@@ -1,5 +1,8 @@
 pandas==2.2.3
 selenium_wire==5.1.0
 blinker==1.7.0
+setuptools==80.9.0
+pyOpenSSL==24.2.1
+cryptography==43.0.3
 python-magic==0.4.27; platform_system != "Windows"
 python-magic-bin==0.4.14; platform_system == "Windows"

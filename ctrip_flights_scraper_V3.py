@@ -4,9 +4,12 @@ import os
 import gzip
 import time
 import json
+import mimetypes
+import smtplib
 import pandas as pd
 from seleniumwire import webdriver
 from datetime import datetime as dt, timedelta
+from email.message import EmailMessage
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -14,22 +17,25 @@ from selenium.webdriver.support.ui import WebDriverWait
 import threading
 
 # 爬取的城市
-crawl_citys = ["上海", "香港", "东京"]
+crawl_citys = ["上海", "香港"]
+
+# 爬取的航线
+crawl_routes = [["上海", "香港"]]
 
 # 爬取日期范围：起始日期。格式'2023-12-01'
-begin_date = None
+begin_date = '2026-09-25'
 
 # 爬取日期范围：结束日期。格式'2023-12-31'
-end_date = None
+end_date = '2026-10-07'
 
 # 爬取T+N，即N天后
 start_interval = 1
 
 # 爬取的日期
-crawl_days = 60
+crawl_days = 13
 
 # 设置各城市爬取的时间间隔（单位：秒）
-crawl_interval = 5
+crawl_interval = 30
 
 # 日期间隔
 days_interval = 1
@@ -38,7 +44,10 @@ days_interval = 1
 max_wait_time = 10
 
 # 最大错误重试次数
-max_retry_time = 5
+max_retry_time = 3
+
+# 页面失败后的重试等待时间（单位：秒）
+retry_wait_time = 30
 
 # 是否只抓取直飞信息（True: 只抓取直飞，False: 抓取所有航班）
 direct_flight = True
@@ -68,9 +77,67 @@ passwords = ['','']
 COOKIES_FILE = "cookies.json"
 REQUIRED_COOKIES = ["AHeadUserInfo", "DUID", "IsNonUser", "_udl", "cticket", "login_type", "login_uid"]
 
+# 邮件发送配置
+SENDER_EMAILS = "1264932425@qq.com"
+RECEIVER_EMAIL = "1264932425@qq.com"
+EMAIL_PASSWORD = "kabyhxldvwbojfgj"
+SMTP_SERVER = "smtp.qq.com"
+SMTP_PORT = 465
+
+result_files = []
+
+def append_result_file(filename):
+    if filename not in result_files:
+        result_files.append(filename)
+
+def wait_before_retry(stage):
+    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} {stage}：等待 {retry_wait_time} 秒后重试')
+    time.sleep(retry_wait_time)
+
+def send_result_email(files):
+    if not files:
+        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 没有生成机票结果文件，跳过邮件发送')
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = f"携程机票价格结果：上海-香港 {begin_date} 至 {end_date}"
+    msg["From"] = SENDER_EMAILS
+    msg["To"] = RECEIVER_EMAIL
+
+    body = [
+        "本轮携程机票价格抓取完成。",
+        f"航线：上海 -> 香港",
+        f"日期范围：{begin_date} 至 {end_date}",
+        "",
+        "结果文件：",
+    ]
+    body.extend([f"{os.path.basename(os.path.dirname(os.path.dirname(path)))}_{os.path.basename(path)}" for path in files])
+    msg.set_content("\n".join(body))
+
+    for path in files:
+        ctype, encoding = mimetypes.guess_type(path)
+        if ctype is None or encoding is not None:
+            ctype = "text/csv"
+        maintype, subtype = ctype.split("/", 1)
+        attachment_name = f"{os.path.basename(os.path.dirname(os.path.dirname(path)))}_{os.path.basename(path)}"
+        with open(path, "rb") as f:
+            msg.add_attachment(
+                f.read(),
+                maintype=maintype,
+                subtype=subtype,
+                filename=attachment_name,
+            )
+
+    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+        server.login(SENDER_EMAILS, EMAIL_PASSWORD)
+        server.send_message(msg)
+
+    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 机票结果邮件发送成功：{RECEIVER_EMAIL}')
+
 def init_driver():
     # options = webdriver.ChromeOptions() # 创建一个配置对象
     options = webdriver.EdgeOptions()  # 创建一个配置对象
+    options.page_load_strategy = "eager"
     options.add_argument("--incognito")  # 隐身模式（无痕模式）
     # options.add_argument('--headless')  # 启用无头模式
     options.add_argument("--no-sandbox")
@@ -78,7 +145,6 @@ def init_driver():
     options.add_argument("--disable-blink-features")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-extensions")
-    options.add_argument("--pageLoadStrategy=eager")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-dev-shm-usage")
@@ -339,7 +405,7 @@ class DataFetcher(object):
                     else:
                         print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:已经弹出登录界面')
                     
-                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "r_input.bbz-js-iconable-input")[0]))
+                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CSS_SELECTOR, ".r_input.bbz-js-iconable-input")[0]))
                     ele.send_keys(account)
                     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:输入账户成功')
                     
@@ -351,7 +417,7 @@ class DataFetcher(object):
                     ele.click()
                     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login:勾选同意成功')
                     
-                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "form_btn.form_btn--block")[0]))
+                    ele = WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(self.driver.find_elements(By.CSS_SELECTOR, ".form_btn.form_btn--block")[0]))
                     ele.click()
     
                     # 检查是否出现验证码验证页面（max_wait_time秒内检测）
@@ -394,7 +460,7 @@ class DataFetcher(object):
                         code_input = WebDriverWait(self.driver, max_wait_time).until(
                             EC.element_to_be_clickable((By.CSS_SELECTOR, f"{double_auth_selector} input[data-testid='verifyCodeInput']"))
                         )
-                        code_input.send_keys(verification_code)
+                        code_input.send_keys(verification_code[0])
                         print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} login: 验证码输入成功')
                         
                         # 从 doubleAuthSwitcherBox 内定位并点击“验 证”按钮
@@ -512,13 +578,17 @@ class DataFetcher(object):
 
                 next_stage_flag = True
         except Exception as e:
+            self.err += 1
             # 用f字符串格式化错误类型和错误信息，提供更多的调试信息
             print(
                 f'{time.strftime("%Y-%m-%d_%H-%M-%S")} get_page：页面加载或元素操作失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
             )
-            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面 URL: {self.driver.current_url}')
-            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面标题: {self.driver.title}')
-            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面源代码: {self.driver.page_source[:500]}...')  # 只打印前500个字符
+            try:
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面 URL: {self.driver.current_url}')
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面标题: {self.driver.title}')
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前页面源代码: {self.driver.page_source[:500]}...')  # 只打印前500个字符
+            except Exception as page_error:
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} get_page：读取当前页面状态失败，错误类型：{type(page_error).__name__}, 详细错误信息：{str(page_error).split("Stacktrace:")[0]}')
 
             # 保存错误截图
             if enable_screenshot:
@@ -526,9 +596,13 @@ class DataFetcher(object):
                 self.driver.save_screenshot(screenshot_path)
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误截图已保存: {screenshot_path}')
 
-            # 重新尝试加载页面，这次指定需要重定向到首页
-            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 重新尝试加载页面，这次指定需要重定向到首页')
-            self.get_page(1)
+            if self.err < max_retry_time:
+                wait_before_retry("get_page")
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 重新尝试加载页面，这次指定需要重定向到首页')
+                self.get_page(1)
+            else:
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,get_page:不继续刷新')
+                self.err = 0
         else:
             if next_stage_flag:
                 # 继续下一步
@@ -618,7 +692,7 @@ class DataFetcher(object):
                     ele = WebDriverWait(self.driver, max_wait_time).until(
                         element_to_be_clickable(
                             self.driver.find_element(
-                                By.CLASS_NAME, "modifyDate.depart-date"
+                                By.CSS_SELECTOR, ".modifyDate.depart-date"
                             )
                         )
                     )
@@ -626,7 +700,7 @@ class DataFetcher(object):
 
                     if int(
                         self.driver.find_elements(
-                            By.CLASS_NAME, "date-picker.date-picker-block"
+                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
                         )[1]
                         .find_element(By.CLASS_NAME, "year")
                         .text[:-1]
@@ -634,19 +708,19 @@ class DataFetcher(object):
                         ele = WebDriverWait(self.driver, max_wait_time).until(
                             element_to_be_clickable(
                                 self.driver.find_elements(
-                                    By.CLASS_NAME,
-                                    "in-date-picker.icon.next-ico.iconf-right",
+                                    By.CSS_SELECTOR,
+                                    ".in-date-picker.icon.next-ico.iconf-right",
                                 )[1]
                             )
                         )
                         print(
-                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CLASS_NAME, "date-picker.date-picker-block")[1].find_element(By.CLASS_NAME, "year").text[:-1])}小于 {int(self.date[:4])} 向右点击'
+                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[1].find_element(By.CLASS_NAME, "year").text[:-1])}小于 {int(self.date[:4])} 向右点击'
                         )
                         ele.click()
                         
                     if int(
                         self.driver.find_elements(
-                            By.CLASS_NAME, "date-picker.date-picker-block"
+                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
                         )[0]
                         .find_element(By.CLASS_NAME, "year")
                         .text[:-1]
@@ -654,26 +728,26 @@ class DataFetcher(object):
                         ele = WebDriverWait(self.driver, max_wait_time).until(
                             element_to_be_clickable(
                                 self.driver.find_elements(
-                                    By.CLASS_NAME,
-                                    "in-date-picker.icon.prev-ico.iconf-left",
+                                    By.CSS_SELECTOR,
+                                    ".in-date-picker.icon.prev-ico.iconf-left",
                                 )[0]
                             )
                         )
                         print(
-                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CLASS_NAME, "date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "year").text[:-1])}大于 {int(self.date[:4])} 向左点击'
+                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "year").text[:-1])}大于 {int(self.date[:4])} 向左点击'
                         )
                         ele.click()
 
                     if int(
                         self.driver.find_elements(
-                            By.CLASS_NAME, "date-picker.date-picker-block"
+                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
                         )[0]
                         .find_element(By.CLASS_NAME, "year")
                         .text[:-1]
                     ) == int(self.date[:4]):
                         if int(
                             self.driver.find_elements(
-                                By.CLASS_NAME, "date-picker.date-picker-block"
+                                By.CSS_SELECTOR, ".date-picker.date-picker-block"
                             )[0]
                             .find_element(By.CLASS_NAME, "month")
                             .text[:-1]
@@ -681,26 +755,26 @@ class DataFetcher(object):
                             ele = WebDriverWait(self.driver, max_wait_time).until(
                                 element_to_be_clickable(
                                     self.driver.find_elements(
-                                        By.CLASS_NAME,
-                                        "in-date-picker.icon.prev-ico.iconf-left",
+                                        By.CSS_SELECTOR,
+                                        ".in-date-picker.icon.prev-ico.iconf-left",
                                     )[0]
                                 )
                             )
                             print(
-                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CLASS_NAME, "date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "month").text[:-1])}大于 {int(self.date[5:7])} 向左点击'
+                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "month").text[:-1])}大于 {int(self.date[5:7])} 向左点击'
                             )
                             ele.click()
                             
                     if int(
                         self.driver.find_elements(
-                            By.CLASS_NAME, "date-picker.date-picker-block"
+                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
                         )[1]
                         .find_element(By.CLASS_NAME, "year")
                         .text[:-1]
                     ) == int(self.date[:4]):
                         if int(
                             self.driver.find_elements(
-                                By.CLASS_NAME, "date-picker.date-picker-block"
+                                By.CSS_SELECTOR, ".date-picker.date-picker-block"
                             )[1]
                             .find_element(By.CLASS_NAME, "month")
                             .text[:-1]
@@ -708,18 +782,18 @@ class DataFetcher(object):
                             ele = WebDriverWait(self.driver, max_wait_time).until(
                                 element_to_be_clickable(
                                     self.driver.find_elements(
-                                        By.CLASS_NAME,
-                                        "in-date-picker.icon.next-ico.iconf-right",
+                                        By.CSS_SELECTOR,
+                                        ".in-date-picker.icon.next-ico.iconf-right",
                                     )[1]
                                 )
                             )
                             print(
-                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CLASS_NAME, "date-picker.date-picker-block")[1].find_element(By.CLASS_NAME, "month").text[:-1])}小于 {int(self.date[5:7])} 向右点击'
+                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[1].find_element(By.CLASS_NAME, "month").text[:-1])}小于 {int(self.date[5:7])} 向右点击'
                             )
                             ele.click()
 
                     for m in self.driver.find_elements(
-                        By.CLASS_NAME, "date-picker.date-picker-block"
+                        By.CSS_SELECTOR, ".date-picker.date-picker-block"
                     ):
                         if int(m.find_element(By.CLASS_NAME, "year").text[:-1]) != int(
                             self.date[:4]
@@ -939,7 +1013,7 @@ class DataFetcher(object):
                 gf = gzip.GzipFile(fileobj=buf)
                 self.dedata = gf.read().decode("UTF-8")
             elif "JSON data" in file_type:
-                print(buf.read().decode("UTF-8"))
+                self.dedata = buf.read().decode("UTF-8")
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 未知的压缩格式：{file_type}')
             
@@ -1315,6 +1389,7 @@ class DataFetcher(object):
                 files_dir, f"{self.city[0]}-{self.city[1]}.csv")
 
             self.df.to_csv(filename, encoding="UTF-8", index=False)
+            append_result_file(filename)
 
             print(f'\n{time.strftime("%Y-%m-%d_%H-%M-%S")} 数据爬取完成 {filename}\n')
 
@@ -1465,7 +1540,7 @@ if __name__ == "__main__":
 
     driver = init_driver()
 
-    citys = gen_citys(crawl_citys)
+    citys = crawl_routes
 
     flight_dates = generate_flight_dates(crawl_days, begin_date, end_date, start_interval, days_interval)
 
@@ -1478,8 +1553,10 @@ if __name__ == "__main__":
             Flight_DataFetcher.date = flight_date
 
             if os.path.exists(os.path.join(os.getcwd(), flight_date, dt.now().strftime("%Y-%m-%d"), f"{city[0]}-{city[1]}.csv")):
+                existing_file = os.path.join(os.getcwd(), flight_date, dt.now().strftime("%Y-%m-%d"), f"{city[0]}-{city[1]}.csv")
+                append_result_file(existing_file)
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 文件已存在:{os.path.join(os.getcwd(), flight_date, dt.now().strftime("%Y-%m-%d"), f"{city[0]}-{city[1]}.csv")}')
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 文件已存在:{existing_file}')
                 continue
             elif ('http' not in Flight_DataFetcher.driver.current_url):
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前的URL是：{driver.current_url}')
@@ -1498,5 +1575,10 @@ if __name__ == "__main__":
         driver.quit()
     except Exception as e:
         print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} An error occurred while quitting the driver: {e}')
+
+    try:
+        send_result_email(result_files)
+    except Exception as e:
+        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 机票结果邮件发送失败：{type(e).__name__}, {e}')
 
     print(f'\n{time.strftime("%Y-%m-%d_%H-%M-%S")} 程序运行完成！！！！')
