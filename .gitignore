@@ -1,4 +1,11 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 .idea/
 run_*.log
+.venv/
+cookies.json
+results/
+.codex/flight_job.log
+.codex/flight_job_status.json
+.codex/flight_job_last_error.png

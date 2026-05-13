@@ -1,9 +1,9 @@
-import magic
-import io
 import os
+import glob
 import gzip
 import time
 import json
+import re
 import mimetypes
 import smtplib
 import pandas as pd
@@ -14,25 +14,54 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import StaleElementReferenceException
 import threading
 
-# 爬取的城市
-crawl_citys = ["上海", "香港"]
+origin_city = "上海"
+
+# 爬取的欧洲主要城市
+destination_citys = [
+    "伦敦",
+    "巴黎",
+    "法兰克福",
+    "阿姆斯特丹",
+    "马德里",
+    "罗马",
+    "米兰",
+    "慕尼黑",
+    "苏黎世",
+    "维也纳",
+    "伊斯坦布尔",
+    "赫尔辛基",
+    "哥本哈根",
+    "巴塞罗那",
+    "布鲁塞尔",
+    "都柏林",
+    "布拉格",
+    "雅典",
+    "里斯本",
+    "斯德哥尔摩",
+    "奥斯陆",
+    "华沙",
+]
 
 # 爬取的航线
-crawl_routes = [["上海", "香港"]]
+crawl_routes = [[origin_city, city] for city in destination_citys]
 
 # 爬取日期范围：起始日期。格式'2023-12-01'
 begin_date = '2026-09-25'
 
 # 爬取日期范围：结束日期。格式'2023-12-31'
-end_date = '2026-10-07'
+end_date = '2026-10-10'
+
+# 往返最短间隔天数
+min_stay_days = 9
 
 # 爬取T+N，即N天后
 start_interval = 1
 
 # 爬取的日期
-crawl_days = 13
+crawl_days = 16
 
 # 设置各城市爬取的时间间隔（单位：秒）
 crawl_interval = 30
@@ -41,7 +70,10 @@ crawl_interval = 30
 days_interval = 1
 
 # 设置页面加载的最长等待时间（单位：秒）
-max_wait_time = 10
+max_wait_time = 60
+
+# 等待航班结果接口完成的最长时间（单位：秒）
+max_search_wait_time = 120
 
 # 最大错误重试次数
 max_retry_time = 3
@@ -50,7 +82,7 @@ max_retry_time = 3
 retry_wait_time = 30
 
 # 是否只抓取直飞信息（True: 只抓取直飞，False: 抓取所有航班）
-direct_flight = True
+direct_flight = False
 
 # 是否抓取航班舒适信息（True: 抓取，False: 不抓取）
 comft_flight = False
@@ -75,7 +107,9 @@ passwords = ['','']
 
 #本地登录缓存
 COOKIES_FILE = "cookies.json"
+MANUAL_COOKIE_ACCOUNT = "manual_login"
 REQUIRED_COOKIES = ["AHeadUserInfo", "DUID", "IsNonUser", "_udl", "cticket", "login_type", "login_uid"]
+manual_login_wait_seconds = 600
 
 # 邮件发送配置
 SENDER_EMAILS = "1264932425@qq.com"
@@ -84,11 +118,43 @@ EMAIL_PASSWORD = "kabyhxldvwbojfgj"
 SMTP_SERVER = "smtp.qq.com"
 SMTP_PORT = 465
 
+# 程序结束后是否自动发邮件；本任务要求先给 lyx 预览，默认关闭。
+send_email_after_run = False
+
 result_files = []
+result_run_day = dt.now().strftime("%Y-%m-%d")
+
+OPEN_JAW_COLUMNS = [
+    "状态",
+    "查询日期",
+    "查询模式",
+    "开口程组合",
+    "出发城市",
+    "目的城市",
+    "去程出发城市",
+    "去程到达城市",
+    "返程出发城市",
+    "返程到达城市",
+    "去程出发日期",
+    "回程出发日期",
+    "停留天数",
+    "排序方式",
+    "价格说明",
+    "往返含税价",
+    "开口程含税价",
+    "去程展示信息",
+    "去程按钮文案",
+    "回程展示信息",
+    "回程按钮文案",
+]
 
 def append_result_file(filename):
     if filename not in result_files:
         result_files.append(filename)
+
+def set_result_run_day(run_day):
+    global result_run_day
+    result_run_day = run_day
 
 def wait_before_retry(stage):
     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} {stage}：等待 {retry_wait_time} 秒后重试')
@@ -100,14 +166,17 @@ def send_result_email(files):
         return
 
     msg = EmailMessage()
-    msg["Subject"] = f"携程机票价格结果：上海-香港 {begin_date} 至 {end_date}"
+    msg["Subject"] = f"携程机票往返价格结果：{origin_city}-欧洲 {begin_date} 至 {end_date}"
     msg["From"] = SENDER_EMAILS
     msg["To"] = RECEIVER_EMAIL
 
     body = [
-        "本轮携程机票价格抓取完成。",
-        f"航线：上海 -> 香港",
-        f"日期范围：{begin_date} 至 {end_date}",
+        "本轮携程机票往返价格查询完成。",
+        f"出发地：{origin_city}",
+        f"目的地数量：{len(destination_citys)}",
+        f"去程出发日期范围：{begin_date} 至 {end_date}",
+        f"回程出发日期范围：{begin_date} 至 {end_date}",
+        f"最短停留天数：{min_stay_days}",
         "",
         "结果文件：",
     ]
@@ -135,8 +204,7 @@ def send_result_email(files):
     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 机票结果邮件发送成功：{RECEIVER_EMAIL}')
 
 def init_driver():
-    # options = webdriver.ChromeOptions() # 创建一个配置对象
-    options = webdriver.EdgeOptions()  # 创建一个配置对象
+    options = webdriver.ChromeOptions()
     options.page_load_strategy = "eager"
     options.add_argument("--incognito")  # 隐身模式（无痕模式）
     # options.add_argument('--headless')  # 启用无头模式
@@ -152,11 +220,7 @@ def init_driver():
     options.add_argument("--ignore-certificate-errors-spki-list")
     options.add_argument("--ignore-ssl-errors")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])  # 不显示正在受自动化软件控制的提示
-    # 如果需要指定Chrome驱动的路径，取消下面这行的注释并设置正确的路径
-    # chromedriver_path = '/path/to/chromedriver'
-    # 如果需要指定路径，可以加上executable_path参数
-    # driver = webdriver.Chrome(options=options)  
-    driver = webdriver.Edge(options=options)
+    driver = webdriver.Chrome(options=options)
     driver.maximize_window()
 
     return driver
@@ -200,6 +264,114 @@ def generate_flight_dates(n, begin_date, end_date, start_interval, days_interval
     
     return flight_dates
 
+def generate_round_trip_dates(begin_date, end_date, min_stay_days, days_interval):
+    depart_dates = generate_flight_dates(crawl_days, begin_date, end_date, start_interval, days_interval)
+    date_pairs = []
+    for depart_date in depart_dates:
+        depart_dt = dt.strptime(depart_date, "%Y-%m-%d")
+        for return_date in depart_dates:
+            return_dt = dt.strptime(return_date, "%Y-%m-%d")
+            if (return_dt - depart_dt).days >= min_stay_days:
+                date_pairs.append((depart_date, return_date))
+    return date_pairs
+
+def result_file_path(city, depart_date, return_date):
+    files_dir = os.path.join(
+        os.getcwd(),
+        "results",
+        f"{begin_date}_to_{end_date}",
+        result_run_day,
+    )
+    filename = f"{city[0]}-{city[1]}_{depart_date}_return_{return_date}.csv"
+    return os.path.join(files_dir, filename)
+
+def open_jaw_group_key(outbound_destination, return_departure_city):
+    return f"{origin_city}-{outbound_destination}__{return_departure_city}-{origin_city}"
+
+def open_jaw_raw_result_file_path(outbound_destination, return_departure_city, depart_date, return_date):
+    files_dir = os.path.join(
+        os.getcwd(),
+        "results",
+        f"{begin_date}_to_{end_date}",
+        result_run_day,
+        "open_jaw",
+        "raw",
+    )
+    filename = f"{open_jaw_group_key(outbound_destination, return_departure_city)}_{depart_date}_return_{return_date}.csv"
+    return os.path.join(files_dir, filename)
+
+def open_jaw_group_result_file_path(outbound_destination, return_departure_city):
+    files_dir = os.path.join(
+        os.getcwd(),
+        "results",
+        f"{begin_date}_to_{end_date}",
+        result_run_day,
+        "open_jaw",
+    )
+    filename = f"{open_jaw_group_key(outbound_destination, return_departure_city)}.csv"
+    return os.path.join(files_dir, filename)
+
+def write_open_jaw_group_results(outbound_destination, return_departure_city):
+    pattern = os.path.join(
+        os.getcwd(),
+        "results",
+        f"{begin_date}_to_{end_date}",
+        result_run_day,
+        "open_jaw",
+        "raw",
+        f"{open_jaw_group_key(outbound_destination, return_departure_city)}_*.csv",
+    )
+    files = sorted(glob.glob(pattern))
+    frames = []
+    for path in files:
+        if os.path.exists(path):
+            frame = pd.read_csv(path)
+            for column in OPEN_JAW_COLUMNS:
+                if column not in frame.columns:
+                    frame[column] = ""
+            frames.append(frame[OPEN_JAW_COLUMNS])
+
+    if not frames:
+        return None
+
+    combined = pd.concat(frames, ignore_index=True)
+    if "往返含税价" in combined.columns:
+        combined["_sort_price"] = pd.to_numeric(combined["往返含税价"], errors="coerce")
+        combined = combined.sort_values("_sort_price", ascending=False, na_position="last")
+        combined = combined.drop(columns=["_sort_price"])
+
+    group_file = open_jaw_group_result_file_path(outbound_destination, return_departure_city)
+    files_dir = os.path.dirname(group_file)
+    if not os.path.exists(files_dir):
+        os.makedirs(files_dir)
+    combined.to_csv(group_file, encoding="UTF-8", index=False)
+    return group_file
+
+def write_combined_results(files):
+    if not files:
+        return None
+
+    frames = []
+    for path in files:
+        if os.path.exists(path):
+            frames.append(pd.read_csv(path))
+
+    if not frames:
+        return None
+
+    combined = pd.concat(frames, ignore_index=True)
+    files_dir = os.path.join(
+        os.getcwd(),
+        "results",
+        f"{begin_date}_to_{end_date}",
+        result_run_day,
+    )
+    if not os.path.exists(files_dir):
+        os.makedirs(files_dir)
+    combined_file = os.path.join(files_dir, f"{origin_city}-欧洲往返机票汇总.csv")
+    combined.to_csv(combined_file, encoding="UTF-8", index=False)
+    return combined_file
+
 # element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
 def element_to_be_clickable(element):
     def check_clickable(driver):
@@ -217,10 +389,15 @@ class DataFetcher(object):
     def __init__(self, driver):
         self.driver = driver
         self.date = None
+        self.return_date = None
         self.city = None
+        self.query_mode = "roundtrip"
+        self.return_departure_city = None
         self.err = 0  # 错误重试次数
         self.switch_acc = 0 #切换账户
         self.comfort_data = None  # 航班舒适度信息
+        self.manual_cookies_loaded = False
+        self.captcha_detected = False
 
     def refresh_driver(self):
         try:
@@ -258,6 +435,8 @@ class DataFetcher(object):
             self.driver.execute_script("document.querySelectorAll('.shortcut, .shortcut-link').forEach(element => element.remove());")
             # 移除分享链接
             self.driver.execute_script("document.querySelectorAll('.shareline').forEach(element => element.remove());")
+            # 移除透明风控动画 iframe，避免遮挡点击
+            self.driver.execute_script("document.querySelectorAll('#stageFrame').forEach(element => element.remove());")
             '''
             # 使用JavaScript删除有的<dl>标签
             self.driver.execute_script("""
@@ -276,41 +455,9 @@ class DataFetcher(object):
         try:
             # 检查是否有验证码元素，如果有，则需要人工处理
             if (len(self.driver.find_elements(By.ID, "verification-code")) + len(self.driver.find_elements(By.CLASS_NAME, "alert-title"))):
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码被触发verification-code/alert-title，请手动完成验证。')
-    
-                user_input_completed = threading.Event()
-                # 等待用户手动处理验证码
-                def wait_for_input():
-                    input("请完成验证码，然后按回车键继续...")
-                    user_input_completed.set()
-    
-                input_thread = threading.Thread(target=wait_for_input)
-                input_thread.start()
-    
-                # 设置手动验证超时时间
-                timeout_seconds = crawl_interval * 100
-    
-                input_thread.join(timeout=timeout_seconds)
-    
-                if user_input_completed.is_set():
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码处理完成，继续执行。')
-    
-                    # 等待页面加载完成
-                    WebDriverWait(self.driver, max_wait_time).until(
-                        EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
-                    )
-                    
-                    # 移除注意事项
-                    self.remove_btn()
-                    return True
-                else:
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code: 手动验证超时 {timeout_seconds} 秒')
-                    self.driver.quit()
-                    self.driver = init_driver()
-                    self.err = 0
-                    self.switch_acc += 1
-                    self.get_page(1)
-                    return False
+                self.captcha_detected = True
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码或风控被触发，停止当前自动化执行。')
+                return False
             else:
                 # 移除注意事项
                 self.remove_btn()
@@ -344,6 +491,46 @@ class DataFetcher(object):
         cookies_all[account] = cookies
         with open(COOKIES_FILE, "w") as f:
             json.dump(cookies_all, f)
+
+    def has_login_modal(self):
+        return len(self.driver.find_elements(By.CLASS_NAME, "lg_loginbox_modal")) > 0
+
+    def save_current_manual_cookies(self):
+        cookies = [
+            cookie
+            for cookie in self.driver.get_cookies()
+            if "ctrip.com" in cookie.get("domain", "") or "trip.com" in cookie.get("domain", "")
+        ]
+        self.save_cookies(MANUAL_COOKIE_ACCOUNT, cookies)
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 已保存 {len(cookies)} 条携程 cookies")
+
+    def load_manual_cookies(self):
+        if self.manual_cookies_loaded:
+            return
+
+        cookies = self.load_cookies(MANUAL_COOKIE_ACCOUNT)
+        if not cookies:
+            return
+
+        for cookie in cookies:
+            self.driver.add_cookie(cookie)
+        self.manual_cookies_loaded = True
+        self.driver.refresh()
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 已加载本地携程 cookies")
+
+    def wait_for_manual_login(self):
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 请在弹出的 Chrome 中完成携程登录")
+        deadline = time.time() + manual_login_wait_seconds
+        while time.time() < deadline:
+            cookie_names = {cookie.get("name") for cookie in self.driver.get_cookies()}
+            if any(cookie_name in cookie_names for cookie_name in REQUIRED_COOKIES) and not self.has_login_modal():
+                self.save_current_manual_cookies()
+                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 检测到登录完成")
+                return True
+            time.sleep(5)
+
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 等待登录超时")
+        return False
 
     def delete_cookies(self, account):
         try:
@@ -529,6 +716,7 @@ class DataFetcher(object):
                 # 前往首页
                 self.driver.get(
                     "https://flights.ctrip.com/online/channel/domestic")
+                self.load_manual_cookies()
                 end_time = time.time()
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 前往首页耗时: {end_time - start_time:.2f} 秒')
 
@@ -537,44 +725,27 @@ class DataFetcher(object):
 
             # 检查注意事项和验证码
             if self.check_verification_code():
+                if self.query_mode == "open_jaw":
+                    self.select_trip_type("多程")
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 等待页面加载完成...')
                 WebDriverWait(self.driver, max_wait_time).until(
                     EC.presence_of_element_located(
-                        (By.CLASS_NAME, "pc_home-jipiao"))
+                        (By.CLASS_NAME, "form-input-v3"))
                 )
+                if self.query_mode == "open_jaw":
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        lambda d: len(d.find_elements(By.CSS_SELECTOR, ".form-input-v2")) >= 6
+                    )
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        lambda d: len(d.find_elements(By.CSS_SELECTOR, ".modifyDate")) >= 3
+                    )
+                else:
+                    WebDriverWait(self.driver, max_wait_time).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, ".modifyDate.return-date"))
+                    )
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载完成')
-
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试点击飞机图标...')
-                # 点击飞机图标，返回主界面
-                ele = WebDriverWait(self.driver, max_wait_time).until(
-                    element_to_be_clickable(
-                        self.driver.find_element(
-                            By.CLASS_NAME, "pc_home-jipiao")
-                    )
-                )
-                ele.click()
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 成功点击飞机图标')
-
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试选择单程...')
-                # 单程
-                ele = WebDriverWait(self.driver, max_wait_time).until(
-                    element_to_be_clickable(
-                        self.driver.find_elements(
-                            By.CLASS_NAME, "radio-label")[0]
-                    )
-                )
-                ele.click()
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 成功选择单程')
-
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试点击搜索按钮...')
-                # 搜索
-                ele = WebDriverWait(self.driver, max_wait_time).until(
-                    element_to_be_clickable(
-                        self.driver.find_element(By.CLASS_NAME, "search-btn")
-                    )
-                )
-                ele.click()
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 成功点击搜索按钮')
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 已确认当前页面为{self.query_mode}查询')
 
                 next_stage_flag = True
         except Exception as e:
@@ -607,9 +778,81 @@ class DataFetcher(object):
             if next_stage_flag:
                 # 继续下一步
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载成功，继续下一步')
-                self.change_city()
+                if self.query_mode == "open_jaw":
+                    self.change_open_jaw_city()
+                else:
+                    self.change_city()
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载成功，但未能完成所有操作')
+
+    def select_trip_type(self, label):
+        tabs = WebDriverWait(self.driver, max_wait_time).until(
+            lambda d: [
+                item
+                for item in d.find_elements(By.CSS_SELECTOR, ".form-select-radio-group li")
+                if label in item.text and item.is_displayed() and item.is_enabled()
+            ]
+        )
+        for tab in tabs:
+            if tab.is_displayed() and tab.is_enabled():
+                tab.click()
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 已选择查询类型：{label}')
+                return
+        raise RuntimeError(f"未找到查询类型：{label}")
+
+    def fill_city_input(self, input_index, city_name):
+        for _ in range(3):
+            WebDriverWait(self.driver, max_wait_time).until(
+                lambda d: len(d.find_elements(By.CLASS_NAME, "form-input-v3")) > input_index
+            )
+            city_input = self.driver.find_elements(By.CLASS_NAME, "form-input-v3")[input_index]
+            if city_name in city_input.get_attribute("value"):
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换城市【{input_index}】-'
+                    f'{city_input.get_attribute("value")}'
+                )
+                return
+
+            ele = WebDriverWait(self.driver, max_wait_time).until(
+                element_to_be_clickable(city_input)
+            )
+            ele.click()
+            ele.send_keys(Keys.COMMAND + "a")
+            ele = WebDriverWait(self.driver, max_wait_time).until(
+                element_to_be_clickable(self.driver.find_elements(By.CLASS_NAME, "form-input-v3")[input_index])
+            )
+            ele.send_keys(city_name)
+            time.sleep(1)
+            ele.send_keys(Keys.ENTER)
+            time.sleep(1)
+
+        value = self.driver.find_elements(By.CLASS_NAME, "form-input-v3")[input_index].get_attribute("value")
+        raise RuntimeError(f"未能填写城市输入框【{input_index}】：目标 {city_name}，当前 {value}")
+
+    def fill_city_input_by_selector(self, selector, city_name):
+        for _ in range(3):
+            city_input = WebDriverWait(self.driver, max_wait_time).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+            )
+            if city_name in city_input.get_attribute("value"):
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换城市【{selector}】-'
+                    f'{city_input.get_attribute("value")}'
+                )
+                return
+
+            ele = WebDriverWait(self.driver, max_wait_time).until(
+                element_to_be_clickable(city_input)
+            )
+            ele.click()
+            ele.send_keys(Keys.COMMAND + "a")
+            ele.send_keys(city_name)
+            time.sleep(1)
+            ele.send_keys(Keys.ENTER)
+            time.sleep(1)
+
+        value = self.driver.find_element(By.CSS_SELECTOR, selector).get_attribute("value")
+        raise RuntimeError(f"未能填写城市输入框【{selector}】：目标 {city_name}，当前 {value}")
 
     def change_city(self):
         next_stage_flag = False
@@ -622,6 +865,14 @@ class DataFetcher(object):
 
             # 检查注意事项和验证码
             if self.check_verification_code():
+                if self.has_login_modal():
+                    if self.wait_for_manual_login():
+                        self.err = 0
+                    else:
+                        return
+
+                del self.driver.requests
+
                 # 若出发地与目标值不符，则更改出发地
                 while self.city[0] not in self.driver.find_elements(
                     By.CLASS_NAME, "form-input-v3"
@@ -639,7 +890,7 @@ class DataFetcher(object):
                                 By.CLASS_NAME, "form-input-v3")[0]
                         )
                     )
-                    ele.send_keys(Keys.CONTROL + "a")
+                    ele.send_keys(Keys.COMMAND + "a")
                     ele = WebDriverWait(self.driver, max_wait_time).until(
                         element_to_be_clickable(
                             self.driver.find_elements(
@@ -647,6 +898,8 @@ class DataFetcher(object):
                         )
                     )
                     ele.send_keys(self.city[0])
+                    time.sleep(1)
+                    ele.send_keys(Keys.ENTER)
 
                 print(
                     f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换城市【0】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[0].get_attribute("value")}'
@@ -669,7 +922,7 @@ class DataFetcher(object):
                                 By.CLASS_NAME, "form-input-v3")[1]
                         )
                     )
-                    ele.send_keys(Keys.CONTROL + "a")
+                    ele.send_keys(Keys.COMMAND + "a")
                     ele = WebDriverWait(self.driver, max_wait_time).until(
                         element_to_be_clickable(
                             self.driver.find_elements(
@@ -677,192 +930,35 @@ class DataFetcher(object):
                         )
                     )
                     ele.send_keys(self.city[1])
+                    time.sleep(1)
+                    ele.send_keys(Keys.ENTER)
 
                 print(
                     f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换城市【1】-{self.driver.find_elements(By.CLASS_NAME,"form-input-v3")[1].get_attribute("value")}'
                 )
 
-                while (
-                    self.driver.find_elements(By.CSS_SELECTOR, "[aria-label=请选择日期]")[
-                        0
-                    ].get_attribute("value")
-                    != self.date
-                ):
-                    # 点击日期选择
-                    ele = WebDriverWait(self.driver, max_wait_time).until(
-                        element_to_be_clickable(
-                            self.driver.find_element(
-                                By.CSS_SELECTOR, ".modifyDate.depart-date"
-                            )
-                        )
-                    )
-                    ele.click()
-
-                    if int(
-                        self.driver.find_elements(
-                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
-                        )[1]
-                        .find_element(By.CLASS_NAME, "year")
-                        .text[:-1]
-                    ) < int(self.date[:4]):
-                        ele = WebDriverWait(self.driver, max_wait_time).until(
-                            element_to_be_clickable(
-                                self.driver.find_elements(
-                                    By.CSS_SELECTOR,
-                                    ".in-date-picker.icon.next-ico.iconf-right",
-                                )[1]
-                            )
-                        )
-                        print(
-                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[1].find_element(By.CLASS_NAME, "year").text[:-1])}小于 {int(self.date[:4])} 向右点击'
-                        )
-                        ele.click()
-                        
-                    if int(
-                        self.driver.find_elements(
-                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
-                        )[0]
-                        .find_element(By.CLASS_NAME, "year")
-                        .text[:-1]
-                    ) > int(self.date[:4]):
-                        ele = WebDriverWait(self.driver, max_wait_time).until(
-                            element_to_be_clickable(
-                                self.driver.find_elements(
-                                    By.CSS_SELECTOR,
-                                    ".in-date-picker.icon.prev-ico.iconf-left",
-                                )[0]
-                            )
-                        )
-                        print(
-                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "year").text[:-1])}大于 {int(self.date[:4])} 向左点击'
-                        )
-                        ele.click()
-
-                    if int(
-                        self.driver.find_elements(
-                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
-                        )[0]
-                        .find_element(By.CLASS_NAME, "year")
-                        .text[:-1]
-                    ) == int(self.date[:4]):
-                        if int(
-                            self.driver.find_elements(
-                                By.CSS_SELECTOR, ".date-picker.date-picker-block"
-                            )[0]
-                            .find_element(By.CLASS_NAME, "month")
-                            .text[:-1]
-                        ) > int(self.date[5:7]):
-                            ele = WebDriverWait(self.driver, max_wait_time).until(
-                                element_to_be_clickable(
-                                    self.driver.find_elements(
-                                        By.CSS_SELECTOR,
-                                        ".in-date-picker.icon.prev-ico.iconf-left",
-                                    )[0]
-                                )
-                            )
-                            print(
-                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[0].find_element(By.CLASS_NAME, "month").text[:-1])}大于 {int(self.date[5:7])} 向左点击'
-                            )
-                            ele.click()
-                            
-                    if int(
-                        self.driver.find_elements(
-                            By.CSS_SELECTOR, ".date-picker.date-picker-block"
-                        )[1]
-                        .find_element(By.CLASS_NAME, "year")
-                        .text[:-1]
-                    ) == int(self.date[:4]):
-                        if int(
-                            self.driver.find_elements(
-                                By.CSS_SELECTOR, ".date-picker.date-picker-block"
-                            )[1]
-                            .find_element(By.CLASS_NAME, "month")
-                            .text[:-1]
-                        ) < int(self.date[5:7]):
-                            ele = WebDriverWait(self.driver, max_wait_time).until(
-                                element_to_be_clickable(
-                                    self.driver.find_elements(
-                                        By.CSS_SELECTOR,
-                                        ".in-date-picker.icon.next-ico.iconf-right",
-                                    )[1]
-                                )
-                            )
-                            print(
-                                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期{int(self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")[1].find_element(By.CLASS_NAME, "month").text[:-1])}小于 {int(self.date[5:7])} 向右点击'
-                            )
-                            ele.click()
-
-                    for m in self.driver.find_elements(
-                        By.CSS_SELECTOR, ".date-picker.date-picker-block"
-                    ):
-                        if int(m.find_element(By.CLASS_NAME, "year").text[:-1]) != int(
-                            self.date[:4]
-                        ):
-                            continue
-
-                        if int(m.find_element(By.CLASS_NAME, "month").text[:-1]) != int(
-                            self.date[5:7]
-                        ):
-                            continue
-
-                        for d in m.find_elements(By.CLASS_NAME, "date-d"):
-                            if int(d.text) == int(self.date[-2:]):
-                                ele = WebDriverWait(self.driver, max_wait_time).until(
-                                    element_to_be_clickable(d)
-                                )
-                                ele.click()
-                                break
+                self.select_date(self.date, ".modifyDate.depart-date")
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期-{self.driver.find_elements(By.CSS_SELECTOR,"[aria-label=请选择日期]")[0].get_attribute("value")}'
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换日期-{self.get_date_value(".modifyDate.depart-date")}'
                 )
 
-                while "(" not in self.driver.find_elements(
-                    By.CLASS_NAME, "form-input-v3"
-                )[0].get_attribute("value"):
-                    # Enter搜索
-                    # ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
-                    # ele.send_keys(Keys.ENTER)
-                    ele = WebDriverWait(self.driver, max_wait_time).until(
-                        element_to_be_clickable(
-                            self.driver.find_elements(
-                                By.CLASS_NAME, "form-input-v3")[0]
-                        )
-                    )
-                    ele.click()
+                self.select_date(self.return_date, ".modifyDate.return-date")
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换返程日期-{self.get_date_value(".modifyDate.return-date")}'
+                )
 
-                    # 通过低价提醒按钮实现enter键换页
-                    ele = WebDriverWait(self.driver, max_wait_time).until(
-                        element_to_be_clickable(
-                            self.driver.find_elements(
-                                By.CLASS_NAME, "low-price-remind"
-                            )[0]
-                        )
-                    )
-                    ele.click()
+                self.confirm_city_selected(0)
+                self.confirm_city_selected(1)
 
-                while "(" not in self.driver.find_elements(
-                    By.CLASS_NAME, "form-input-v3"
-                )[1].get_attribute("value"):
-                    # Enter搜索
-                    # ele=WebDriverWait(self.driver, max_wait_time).until(element_to_be_clickable(its[1]))
-                    # ele.send_keys(Keys.ENTER)
-                    ele = WebDriverWait(self.driver, max_wait_time).until(
-                        element_to_be_clickable(
-                            self.driver.find_elements(
-                                By.CLASS_NAME, "form-input-v3")[1]
-                        )
-                    )
-                    ele.click()
+                del self.driver.requests
 
-                    # 通过低价提醒按钮实现enter键换页
-                    ele = WebDriverWait(self.driver, max_wait_time).until(
-                        element_to_be_clickable(
-                            self.driver.find_elements(
-                                By.CLASS_NAME, "low-price-remind"
-                            )[0]
-                        )
+                ele = WebDriverWait(self.driver, max_wait_time).until(
+                    element_to_be_clickable(
+                        self.driver.find_element(By.CLASS_NAME, "search-btn")
                     )
-                    ele.click()
+                )
+                ele.click()
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：点击搜索按钮')
 
                 next_stage_flag = True
 
@@ -880,51 +976,540 @@ class DataFetcher(object):
                 f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,change_city：更换城市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
             )
 
+            if self.has_login_modal():
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：检测到登录弹窗，等待手动登录'
+                )
+                if self.wait_for_manual_login():
+                    self.err = 0
+                    self.change_city()
+                return
+
             # 检查注意事项和验证码
             if self.check_verification_code():
                 if self.err < max_retry_time:
-                    if len(self.driver.find_elements(By.CLASS_NAME, "lg_loginbox_modal")):
-                        print(
-                            f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：检测到登录弹窗，需要登录'
-                        )
-                        self.login()
                     # 重试
                     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：重试')
                     self.change_city()
                 # 判断错误次数
                 if self.err >= max_retry_time:
                     print(
-                        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,change_city:重新尝试加载页面，这次指定需要重定向到首页'
+                        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,change_city:不继续重试'
                     )
-
-                    # 删除本次请求
-                    del self.driver.requests
 
                     # 重置错误计数
                     self.err = 0
-
-                    # 重新尝试加载页面，这次指定需要重定向到首页
-                    self.get_page(1)
+                    self.records = [self.build_no_result_record("页面交互失败")]
+                    self.write_roundtrip_data()
         else:
             if next_stage_flag:
                 # 若无错误，执行下一步
-                self.get_data()
+                self.collect_low_price_roundtrip_from_page()
 
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：成功更换城市和日期，当前路线为：{self.city[0]}-{self.city[1]}')
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：成功更换城市和日期，当前路线为：{self.city[0]}-{self.city[1]}，去程：{self.date}，返程：{self.return_date}')
+
+    def change_open_jaw_city(self):
+        next_stage_flag = False
+        try:
+            WebDriverWait(self.driver, max_wait_time).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, ".form-input-v2")) >= 6
+            )
+
+            if self.check_verification_code():
+                if self.has_login_modal():
+                    if self.wait_for_manual_login():
+                        self.err = 0
+                    else:
+                        return
+
+                return_departure_city = self.return_departure_city
+                if not return_departure_city:
+                    raise RuntimeError("open_jaw 模式缺少返程出发城市")
+
+                del self.driver.requests
+
+                self.fill_city_input_by_selector("input[name='mtDCity1']", self.city[0])
+                self.fill_city_input_by_selector("input[name='mtACity1']", self.city[1])
+                self.fill_city_input_by_selector("input[name='mtDCity2']", return_departure_city)
+                self.fill_city_input_by_selector("input[name='mtACity2']", self.city[0])
+
+                self.select_date_by_index(self.date, 0)
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_open_jaw_city：更换第一程日期-{self.get_date_value_by_index(0)}'
+                )
+
+                self.select_date_by_index(self.return_date, 1)
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_open_jaw_city：更换第二程日期-{self.get_date_value_by_index(1)}'
+                )
+
+                for selector in [
+                    "input[name='mtDCity1']",
+                    "input[name='mtACity1']",
+                    "input[name='mtDCity2']",
+                    "input[name='mtACity2']",
+                ]:
+                    self.confirm_city_selected_by_selector(selector)
+
+                del self.driver.requests
+
+                ele = WebDriverWait(self.driver, max_wait_time).until(
+                    element_to_be_clickable(self.driver.find_element(By.CLASS_NAME, "search-btn"))
+                )
+                ele.click()
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_open_jaw_city：点击搜索按钮')
+
+                next_stage_flag = True
+
+        except Exception as e:
+            self.err += 1
+            if enable_screenshot:
+                self.driver.save_screenshot(
+                    f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
+                )
+
+            print(
+                f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,change_open_jaw_city：更换城市和日期失败，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
+            )
+
+            if self.has_login_modal():
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_open_jaw_city：检测到登录弹窗，等待手动登录'
+                )
+                if self.wait_for_manual_login():
+                    self.err = 0
+                    self.change_open_jaw_city()
+                return
+
+            if self.check_verification_code():
+                if self.err < max_retry_time:
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_open_jaw_city：重试')
+                    self.change_open_jaw_city()
+                if self.err >= max_retry_time:
+                    print(
+                        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,change_open_jaw_city:不继续重试'
+                    )
+                    self.err = 0
+                    self.records = [self.build_no_result_record("开口程页面交互失败")]
+                    self.write_roundtrip_data()
+        else:
+            if next_stage_flag:
+                self.collect_low_price_open_jaw_from_page()
+
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_open_jaw_city：成功更换城市和日期，当前开口程为：{self.city[0]}-{self.city[1]} / {self.return_departure_city}-{self.city[0]}，去程：{self.date}，返程：{self.return_date}'
+                )
+
+    def get_date_value(self, trigger_selector):
+        return self.driver.find_element(
+            By.CSS_SELECTOR,
+            f"{trigger_selector} input[aria-label=请选择日期]",
+        ).get_attribute("value")
+
+    def get_date_value_by_index(self, trigger_index):
+        return self.driver.find_elements(
+            By.CSS_SELECTOR,
+            ".modifyDate input[aria-label=请选择日期]",
+        )[trigger_index].get_attribute("value")
+
+    def select_date(self, target_date, trigger_selector):
+        target = dt.strptime(target_date, "%Y-%m-%d")
+        for _ in range(3):
+            try:
+                while self.get_date_value(trigger_selector) != target_date:
+                    ele = WebDriverWait(self.driver, max_wait_time).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, trigger_selector))
+                    )
+                    ele.click()
+
+                    for _ in range(24):
+                        pickers = self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")
+                        left_year = int(pickers[0].find_element(By.CLASS_NAME, "year").text[:-1])
+                        left_month = int(pickers[0].find_element(By.CLASS_NAME, "month").text[:-1])
+                        right_year = int(pickers[1].find_element(By.CLASS_NAME, "year").text[:-1])
+                        right_month = int(pickers[1].find_element(By.CLASS_NAME, "month").text[:-1])
+                        left_key = left_year * 12 + left_month
+                        right_key = right_year * 12 + right_month
+                        target_key = target.year * 12 + target.month
+
+                        if target_key < left_key:
+                            ele = WebDriverWait(self.driver, max_wait_time).until(
+                                element_to_be_clickable(
+                                    self.driver.find_elements(
+                                        By.CSS_SELECTOR,
+                                        ".in-date-picker.icon.prev-ico.iconf-left",
+                                    )[0]
+                                )
+                            )
+                            ele.click()
+                            continue
+
+                        if target_key > right_key:
+                            ele = WebDriverWait(self.driver, max_wait_time).until(
+                                element_to_be_clickable(
+                                    self.driver.find_elements(
+                                        By.CSS_SELECTOR,
+                                        ".in-date-picker.icon.next-ico.iconf-right",
+                                    )[1]
+                                )
+                            )
+                            ele.click()
+                            continue
+
+                        for picker in self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block"):
+                            year = int(picker.find_element(By.CLASS_NAME, "year").text[:-1])
+                            month = int(picker.find_element(By.CLASS_NAME, "month").text[:-1])
+                            if year != target.year or month != target.month:
+                                continue
+
+                            for day in picker.find_elements(By.CLASS_NAME, "date-d"):
+                                if day.text and int(day.text) == target.day:
+                                    day.click()
+                                    WebDriverWait(self.driver, max_wait_time).until(
+                                        lambda d: self.get_date_value(trigger_selector) == target_date
+                                    )
+                                    return
+
+                    raise RuntimeError(f"未能选择日期：{target_date}")
+                return
+            except StaleElementReferenceException:
+                time.sleep(1)
+
+        raise RuntimeError(f"日期控件刷新导致选择失败：{target_date}")
+
+    def select_date_by_index(self, target_date, trigger_index):
+        target = dt.strptime(target_date, "%Y-%m-%d")
+        for _ in range(3):
+            try:
+                while self.get_date_value_by_index(trigger_index) != target_date:
+                    ele = WebDriverWait(self.driver, max_wait_time).until(
+                        element_to_be_clickable(
+                            self.driver.find_elements(By.CSS_SELECTOR, ".modifyDate")[trigger_index]
+                        )
+                    )
+                    ele.click()
+
+                    for _ in range(24):
+                        pickers = self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block")
+                        left_year = int(pickers[0].find_element(By.CLASS_NAME, "year").text[:-1])
+                        left_month = int(pickers[0].find_element(By.CLASS_NAME, "month").text[:-1])
+                        right_year = int(pickers[1].find_element(By.CLASS_NAME, "year").text[:-1])
+                        right_month = int(pickers[1].find_element(By.CLASS_NAME, "month").text[:-1])
+                        left_key = left_year * 12 + left_month
+                        right_key = right_year * 12 + right_month
+                        target_key = target.year * 12 + target.month
+
+                        if target_key < left_key:
+                            arrows = [
+                                arrow for arrow in self.driver.find_elements(
+                                    By.CSS_SELECTOR,
+                                    ".in-date-picker.icon.prev-ico.iconf-left",
+                                )
+                                if arrow.is_displayed() and arrow.is_enabled()
+                            ]
+                            if not arrows:
+                                raise RuntimeError("未找到可点击的日期上一页按钮")
+                            ele = WebDriverWait(self.driver, max_wait_time).until(
+                                element_to_be_clickable(arrows[0])
+                            )
+                            ele.click()
+                            time.sleep(0.5)
+                        elif target_key > right_key:
+                            arrows = [
+                                arrow for arrow in self.driver.find_elements(
+                                    By.CSS_SELECTOR,
+                                    ".in-date-picker.icon.next-ico.iconf-right",
+                                )
+                                if arrow.is_displayed() and arrow.is_enabled()
+                            ]
+                            if not arrows:
+                                raise RuntimeError("未找到可点击的日期下一页按钮")
+                            ele = WebDriverWait(self.driver, max_wait_time).until(
+                                element_to_be_clickable(arrows[-1])
+                            )
+                            ele.click()
+                            time.sleep(0.5)
+                        else:
+                            break
+
+                    clicked = False
+                    for picker in self.driver.find_elements(By.CSS_SELECTOR, ".date-picker.date-picker-block"):
+                        year = int(picker.find_element(By.CLASS_NAME, "year").text[:-1])
+                        month = int(picker.find_element(By.CLASS_NAME, "month").text[:-1])
+                        if year != target.year or month != target.month:
+                            continue
+
+                        for date_ele in picker.find_elements(By.CSS_SELECTOR, ".date-day"):
+                            days = date_ele.find_elements(By.CLASS_NAME, "date-d")
+                            if days and days[0].text and int(days[0].text) == target.day:
+                                ele = WebDriverWait(self.driver, max_wait_time).until(
+                                    element_to_be_clickable(date_ele)
+                                )
+                                ele.click()
+                                clicked = True
+                                WebDriverWait(self.driver, max_wait_time).until(
+                                    lambda d: self.get_date_value_by_index(trigger_index) == target_date
+                                )
+                                break
+                        if clicked:
+                            break
+
+                    if not clicked:
+                        raise RuntimeError(f"未能选择日期：{target_date}")
+                return
+            except StaleElementReferenceException:
+                time.sleep(1)
+
+        raise RuntimeError(f"日期控件刷新导致选择失败：{target_date}")
+
+    def confirm_city_selected(self, input_index):
+        for _ in range(3):
+            city_input = self.driver.find_elements(By.CLASS_NAME, "form-input-v3")[input_index]
+            if "(" in city_input.get_attribute("value"):
+                return
+
+            ele = WebDriverWait(self.driver, max_wait_time).until(
+                element_to_be_clickable(city_input)
+            )
+            ele.click()
+            ele.send_keys(Keys.ENTER)
+            time.sleep(1)
+
+        value = self.driver.find_elements(By.CLASS_NAME, "form-input-v3")[input_index].get_attribute("value")
+        raise RuntimeError(f"未能确认城市输入框【{input_index}】：{value}")
+
+    def confirm_city_selected_by_selector(self, selector):
+        for _ in range(3):
+            city_input = self.driver.find_element(By.CSS_SELECTOR, selector)
+            if "(" in city_input.get_attribute("value"):
+                return
+
+            ele = WebDriverWait(self.driver, max_wait_time).until(
+                element_to_be_clickable(city_input)
+            )
+            ele.click()
+            ele.send_keys(Keys.ENTER)
+            time.sleep(1)
+
+        value = self.driver.find_element(By.CSS_SELECTOR, selector).get_attribute("value")
+        raise RuntimeError(f"未能确认城市输入框【{selector}】：{value}")
+
+    def select_low_price_sort(self, stage):
+        ele = WebDriverWait(self.driver, max_search_wait_time).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "li.sort-item.ticket-price"))
+        )
+        if "active" not in ele.get_attribute("class"):
+            ele.click()
+            WebDriverWait(self.driver, max_search_wait_time).until(
+                lambda d: "active" in d.find_element(By.CSS_SELECTOR, "li.sort-item.ticket-price").get_attribute("class")
+            )
+            time.sleep(2)
+        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} {stage}：已选择低价优先')
+
+    def first_flight_item(self):
+        return WebDriverWait(self.driver, max_search_wait_time).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, ".flight-item"))
+        )
+
+    def first_bookable_flight_item(self):
+        return WebDriverWait(self.driver, max_search_wait_time).until(
+            lambda d: next(
+                (
+                    item
+                    for item in d.find_elements(By.CSS_SELECTOR, ".flight-item")
+                    if item.is_displayed() and "订票" in item.text
+                ),
+                False,
+            )
+        )
+
+    def extract_visible_flight(self, item):
+        text = item.text.replace("\n", " ")
+        price_match = re.search(r"¥\s*([\d,]+)", text)
+        price = int(price_match.group(1).replace(",", "")) if price_match else ""
+        action = ""
+        buttons = item.find_elements(By.CSS_SELECTOR, ".btn.btn-book")
+        if buttons:
+            action = buttons[0].text
+        return {
+            "展示信息": text,
+            "往返含税价": price,
+            "按钮文案": action,
+        }
+
+    def collect_low_price_roundtrip_from_page(self):
+        stay_days = (dt.strptime(self.return_date, "%Y-%m-%d") - dt.strptime(self.date, "%Y-%m-%d")).days
+
+        self.select_low_price_sort("去程")
+        outbound_item = self.first_flight_item()
+        outbound_info = self.extract_visible_flight(outbound_item)
+        outbound_button = outbound_item.find_element(By.CSS_SELECTOR, ".btn.btn-book")
+        outbound_button.click()
+
+        WebDriverWait(self.driver, max_search_wait_time).until(
+            lambda d: "选择返程" in d.find_element(By.CSS_SELECTOR, ".segment_tab.active").text
+        )
+        self.select_low_price_sort("返程")
+        return_item = self.first_flight_item()
+        return_info = self.extract_visible_flight(return_item)
+
+        price = return_info["往返含税价"] or outbound_info["往返含税价"]
+        self.records = [
+            {
+                "状态": "成功",
+                "查询日期": dt.now().strftime("%Y-%m-%d"),
+                "出发城市": self.city[0],
+                "目的城市": self.city[1],
+                "去程出发日期": self.date,
+                "回程出发日期": self.return_date,
+                "停留天数": stay_days,
+                "排序方式": "去程低价优先；返程低价优先",
+                "价格说明": "页面低价优先首条往返含税价",
+                "往返含税价": price,
+                "去程展示信息": outbound_info["展示信息"],
+                "去程按钮文案": outbound_info["按钮文案"],
+                "回程展示信息": return_info["展示信息"],
+                "回程按钮文案": return_info["按钮文案"],
+            }
+        ]
+        self.write_roundtrip_data()
+
+    def active_segment_text(self):
+        segments = self.driver.find_elements(By.CSS_SELECTOR, ".segment_tab.active")
+        if segments:
+            return segments[0].text
+        return ""
+
+    def collect_low_price_open_jaw_from_page(self):
+        stay_days = (dt.strptime(self.return_date, "%Y-%m-%d") - dt.strptime(self.date, "%Y-%m-%d")).days
+        return_departure_city = self.return_departure_city
+        if not return_departure_city:
+            raise RuntimeError("open_jaw 模式缺少返程出发城市")
+
+        self.select_low_price_sort("第一程")
+        outbound_item = self.first_flight_item()
+        outbound_info = self.extract_visible_flight(outbound_item)
+        outbound_button = outbound_item.find_element(By.CSS_SELECTOR, ".btn.btn-book")
+        outbound_button.click()
+
+        WebDriverWait(self.driver, max_search_wait_time).until(
+            lambda d: "第二程" in d.find_element(By.TAG_NAME, "body").text
+            and return_departure_city in d.find_element(By.TAG_NAME, "body").text
+            and self.city[0] in d.find_element(By.TAG_NAME, "body").text
+        )
+        self.select_low_price_sort("第二程")
+        return_item = self.first_bookable_flight_item()
+        return_info = self.extract_visible_flight(return_item)
+
+        price = return_info["往返含税价"]
+        if not price:
+            self.records = [self.build_no_result_record("未读到开口程产品含税价")]
+            self.write_roundtrip_data()
+            return
+
+        self.records = [
+            {
+                "状态": "成功",
+                "查询日期": dt.now().strftime("%Y-%m-%d"),
+                "查询模式": "开口程",
+                "开口程组合": open_jaw_group_key(self.city[1], return_departure_city),
+                "出发城市": self.city[0],
+                "目的城市": self.city[1],
+                "去程出发城市": self.city[0],
+                "去程到达城市": self.city[1],
+                "返程出发城市": return_departure_city,
+                "返程到达城市": self.city[0],
+                "去程出发日期": self.date,
+                "回程出发日期": self.return_date,
+                "停留天数": stay_days,
+                "排序方式": "第一程低价优先；第二程低价优先",
+                "价格说明": "携程多程页面第二程低价优先首条展示含税价",
+                "往返含税价": price,
+                "开口程含税价": price,
+                "去程展示信息": outbound_info["展示信息"],
+                "去程按钮文案": outbound_info["按钮文案"],
+                "回程展示信息": return_info["展示信息"],
+                "回程按钮文案": return_info["按钮文案"],
+            }
+        ]
+        self.write_roundtrip_data()
+
+    def decode_search_response(self, request):
+        body = request.response.body
+        content_encoding = request.response.headers.get("Content-Encoding", "").lower()
+        if "gzip" in content_encoding:
+            body = gzip.decompress(body)
+        return json.loads(body.decode("UTF-8"))
+
+    def is_matching_search_request(self, request):
+        if "/international/search/api/search/batchSearch" not in request.url:
+            return False
+
+        request_data = json.loads(request.body)
+        request_segments = request_data.get("flightSegments", [])
+        if len(request_segments) < 2:
+            return False
+
+        outbound = dict(request_segments[0])
+        inbound = dict(request_segments[1])
+        if self.query_mode == "open_jaw":
+            if not self.return_departure_city:
+                return False
+            return (
+                self.city[0] in outbound.get("departureCityName", "")
+                and self.city[1] in outbound.get("arrivalCityName", "")
+                and outbound.get("departureDate") == self.date
+                and self.return_departure_city in inbound.get("departureCityName", "")
+                and self.city[0] in inbound.get("arrivalCityName", "")
+                and inbound.get("departureDate") == self.return_date
+            )
+
+        return (
+            outbound.get("departureCityName") == self.city[0]
+            and self.city[1] in outbound.get("arrivalCityName", "")
+            and outbound.get("departureDate") == self.date
+            and self.city[1] in inbound.get("departureCityName", "")
+            and inbound.get("arrivalCityName") == self.city[0]
+            and inbound.get("departureDate") == self.return_date
+        )
+
+    def wait_for_search_result(self):
+        deadline = time.time() + max_search_wait_time
+        matched_requests = 0
+
+        while time.time() < deadline:
+            for request in reversed(self.driver.requests):
+                if not request.response:
+                    continue
+
+                try:
+                    if not self.is_matching_search_request(request):
+                        continue
+
+                    matched_requests += 1
+                    response_data = self.decode_search_response(request)
+                    data = response_data.get("data", {})
+                    if "flightItineraryList" in data or "searchErrorInfo" in data:
+                        return request, response_data
+
+                    context = data.get("context", {})
+                    if context.get("finished") is True:
+                        return request, response_data
+                except Exception:
+                    continue
+
+            time.sleep(1)
+
+        raise TimeoutError(f"等待航班结果超时，匹配请求数：{matched_requests}")
 
     def get_data(self):
         try:
-            # 等待响应加载完成
-            self.predata = self.driver.wait_for_request(
-                "/international/search/api/search/batchSearch?.*", timeout=max_wait_time
-            )
-            
             if comft_flight:
                 # 捕获 getFlightComfort 数据
                 self.comfort_data = self.capture_flight_comfort_data()
-            
-            rb = dict(json.loads(self.predata.body).get("flightSegments")[0])
+
+            self.predata, self.dedata = self.wait_for_search_result()
 
         except Exception as e:
             # 错误次数+1
@@ -956,68 +1541,29 @@ class DataFetcher(object):
             # 判断错误次数
             if self.err >= max_retry_time:
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,get_data:重新尝试加载页面，这次指定需要重定向到首页'
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,get_data:不继续重试'
                 )
 
                 # 重置错误计数
                 self.err = 0
-                # 重新尝试加载页面，这次指定需要重定向到首页
-                self.get_page(1)
+                self.records = [self.build_no_result_record("获取数据超时")]
+                self.write_roundtrip_data()
         else:
             # 删除本次请求
             del self.driver.requests
 
-            # 检查数据获取正确性
-            if (
-                rb["departureCityName"] == self.city[0]
-                and rb["arrivalCityName"] == self.city[1]
-                and rb["departureDate"] == self.date
-            ):
-                print(f"get_data:城市匹配成功：出发地-{self.city[0]}，目的地-{self.city[1]}")
-
-                # 重置错误计数
-                self.err = 0
-
-                # 若无错误，执行下一步
-                self.decode_data()
-            else:
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,get_data:刷新页面')
-                # 错误次数+1
-                self.err += 1
-
-                # 保存错误截图
-                if enable_screenshot:
-                    self.driver.save_screenshot(
-                        f'screenshot/screenshot_{time.strftime("%Y-%m-%d_%H-%M-%S")}.png'
-                    )
-
-                # 重新更换城市
-                print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} get_data：重新更换城市:{rb["departureCityName"]}-{rb["arrivalCityName"]}-{rb["departureDate"]}'
-                )
-
-                # 检查注意事项和验证码
-                if self.check_verification_code():
-                    # 重试
-                    self.change_city()
+            print(f"get_data:往返结果获取成功：{self.city[0]}-{self.city[1]} {self.date} / {self.return_date}")
+            self.err = 0
+            self.check_data()
 
     def decode_data(self):
         try:
-            # 使用python-magic库检查MIME类型
-            mime = magic.Magic()
-            file_type = mime.from_buffer(self.predata.response.body)
-
-            buf = io.BytesIO(self.predata.response.body)
-
-            if "gzip" in file_type:
-                gf = gzip.GzipFile(fileobj=buf)
-                self.dedata = gf.read().decode("UTF-8")
-            elif "JSON data" in file_type:
-                self.dedata = buf.read().decode("UTF-8")
-            else:
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 未知的压缩格式：{file_type}')
+            body = self.predata.response.body
+            content_encoding = self.predata.response.headers.get("Content-Encoding", "").lower()
+            if "gzip" in content_encoding:
+                body = gzip.decompress(body)
             
-            self.dedata = json.loads(self.dedata)
+            self.dedata = json.loads(body.decode("UTF-8"))
 
         except Exception as e:
             # 错误次数+1
@@ -1048,14 +1594,13 @@ class DataFetcher(object):
             # 判错错误次数
             if self.err >= max_retry_time:
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,decode_data:重新尝试加载页面，这次指定需要重定向到首页'
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,decode_data:不继续重试'
                 )
 
                 # 重置错误计数
                 self.err = 0
-
-                # 重新尝试加载页面，这次指定需要重定向到首页
-                self.get_page(1)
+                self.records = [self.build_no_result_record("数据解码失败")]
+                self.write_roundtrip_data()
         else:
             # 重置错误计数
             self.err = 0
@@ -1066,16 +1611,10 @@ class DataFetcher(object):
     def check_data(self):
         try:
             self.flightItineraryList = self.dedata["data"]["flightItineraryList"]
-            # 倒序遍历,删除转机航班
-            for i in range(len(self.flightItineraryList) - 1, -1, -1):
-                if (
-                    self.flightItineraryList[i]["flightSegments"][0]["transferCount"]
-                    != 0
-                ):
-                    self.flightItineraryList.pop(i)
-            if len(self.flightItineraryList) == 0 and direct_flight:
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 不存在直航航班:{self.city[0]}-{self.city[1]}')
-                # 重置错误计数
+            if len(self.flightItineraryList) == 0:
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 不存在航班:{self.city[0]}-{self.city[1]} {self.date}/{self.return_date}')
+                self.records = [self.build_no_result_record("无航班结果")]
+                self.write_roundtrip_data()
                 self.err = 0
                 return 0
         except Exception as e:
@@ -1108,20 +1647,220 @@ class DataFetcher(object):
             # 判断错误次数
             if self.err >= max_retry_time:
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,check_data:重新尝试加载页面，这次指定需要重定向到首页'
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,check_data:不继续重试'
                 )
 
                 # 重置错误计数
                 self.err = 0
-
-                # 重新尝试加载页面，这次指定需要重定向到首页
-                self.get_page(1)
+                self.records = [self.build_no_result_record("数据检查失败")]
+                self.write_roundtrip_data()
         else:
             # 重置错误计数
             self.err = 0
-            self.proc_flightSegments()
-            self.proc_priceList()
-            self.mergedata()
+            self.proc_roundtrip_itineraries()
+            self.write_roundtrip_data()
+
+    def build_no_result_record(self, reason):
+        record = {
+            "状态": reason,
+            "查询日期": dt.now().strftime("%Y-%m-%d"),
+            "出发城市": self.city[0],
+            "目的城市": self.city[1],
+            "去程出发日期": self.date,
+            "回程出发日期": self.return_date,
+            "停留天数": (dt.strptime(self.return_date, "%Y-%m-%d") - dt.strptime(self.date, "%Y-%m-%d")).days,
+        }
+        if self.query_mode == "open_jaw":
+            record.update(
+                {
+                    "查询模式": "开口程",
+                    "开口程组合": open_jaw_group_key(self.city[1], self.return_departure_city),
+                    "出发城市": self.city[0],
+                    "目的城市": self.city[1],
+                    "去程出发城市": self.city[0],
+                    "去程到达城市": self.city[1],
+                    "返程出发城市": self.return_departure_city,
+                    "返程到达城市": self.city[0],
+                    "排序方式": "",
+                    "价格说明": "",
+                    "往返含税价": "",
+                    "开口程含税价": "",
+                    "去程展示信息": "",
+                    "去程按钮文案": "",
+                    "回程展示信息": "",
+                    "回程按钮文案": "",
+                }
+            )
+        return record
+
+    def extract_price_info(self, price_list):
+        price_info = {}
+        cabin_map = {"Y": "经济舱", "C": "商务舱"}
+
+        for cabin_code, cabin_name in cabin_map.items():
+            candidates = []
+            for price in price_list:
+                if price.get("cabin") != cabin_code:
+                    continue
+
+                adult_price = price.get("adultPrice", 0)
+                if price.get("freeOilFeeAndTax"):
+                    adult_tax = price.get("adultTax", 0)
+                else:
+                    adult_tax = price.get("adultTax", price.get("sortPrice", adult_price) - adult_price)
+
+                candidates.append(
+                    {
+                        "票价": adult_price,
+                        "税费": adult_tax,
+                        "总价": adult_price + adult_tax,
+                        "指标": price.get("miseryIndex", ""),
+                    }
+                )
+
+            if candidates:
+                best = min(candidates, key=lambda item: item["总价"])
+                price_info[f"{cabin_name}票价"] = best["票价"]
+                price_info[f"{cabin_name}税费"] = best["税费"]
+                price_info[f"{cabin_name}总价"] = best["总价"]
+                price_info[f"{cabin_name}指标"] = best["指标"]
+            else:
+                price_info[f"{cabin_name}票价"] = ""
+                price_info[f"{cabin_name}税费"] = ""
+                price_info[f"{cabin_name}总价"] = ""
+                price_info[f"{cabin_name}指标"] = ""
+
+        return price_info
+
+    def format_flight_unit(self, flight):
+        flight_no = flight.get("flightNo", "")
+        airline = flight.get("marketAirlineName", "")
+        departure = f'{flight.get("departureCityName", "")}{flight.get("departureAirportName", "")}({flight.get("departureAirportCode", "")})'
+        arrival = f'{flight.get("arrivalCityName", "")}{flight.get("arrivalAirportName", "")}({flight.get("arrivalAirportCode", "")})'
+        text = (
+            f'{airline}{flight_no} '
+            f'{departure} {flight.get("departureDateTime", "")} -> '
+            f'{arrival} {flight.get("arrivalDateTime", "")}'
+        )
+
+        stop_list = flight.get("stopList") or []
+        if stop_list:
+            stop_text = "、".join(
+                [
+                    f'{stop.get("cityName", "")}({stop.get("airportName", "")}, {stop.get("duration", "")}分钟)'
+                    for stop in stop_list
+                ]
+            )
+            text = f"{text} 经停[{stop_text}]"
+
+        return text
+
+    def format_segment(self, segment):
+        flights = segment.get("flightList", [])
+        chain = " | ".join([self.format_flight_unit(flight) for flight in flights])
+        transfer_chain = " | ".join(
+            [
+                f'{flight.get("arrivalCityName", "")}{flight.get("arrivalAirportName", "")}({flight.get("arrivalAirportCode", "")})'
+                for flight in flights[:-1]
+            ]
+        )
+        first = flights[0] if flights else {}
+        last = flights[-1] if flights else {}
+
+        return {
+            "航班链": chain,
+            "中转次数": segment.get("transferCount", ""),
+            "中转机场链": transfer_chain,
+            "出发机场": first.get("departureAirportName", ""),
+            "出发机场三字码": first.get("departureAirportCode", ""),
+            "到达机场": last.get("arrivalAirportName", ""),
+            "到达机场三字码": last.get("arrivalAirportCode", ""),
+            "出发时间": first.get("departureDateTime", ""),
+            "到达时间": last.get("arrivalDateTime", ""),
+            "总飞行时长": segment.get("duration", ""),
+        }
+
+    def proc_roundtrip_itineraries(self):
+        self.records = []
+        stay_days = (dt.strptime(self.return_date, "%Y-%m-%d") - dt.strptime(self.date, "%Y-%m-%d")).days
+
+        for index, itinerary in enumerate(self.flightItineraryList, start=1):
+            segments = itinerary["flightSegments"]
+            price_info = self.extract_price_info(itinerary.get("priceList", []))
+            outbound_info = self.format_segment(segments[0])
+            if len(segments) > 1:
+                inbound_info = self.format_segment(segments[1])
+                inbound_detail_status = "已展开"
+            else:
+                inbound_info = {
+                    "航班链": "首轮往返报价未展开回程明细",
+                    "中转次数": "",
+                    "中转机场链": "",
+                    "出发机场": "",
+                    "出发机场三字码": "",
+                    "到达机场": "",
+                    "到达机场三字码": "",
+                    "出发时间": "",
+                    "到达时间": "",
+                    "总飞行时长": "",
+                }
+                inbound_detail_status = "未展开"
+
+            record = {
+                "状态": "成功",
+                "查询日期": dt.now().strftime("%Y-%m-%d"),
+                "出发城市": self.city[0],
+                "目的城市": self.city[1],
+                "去程出发日期": self.date,
+                "回程出发日期": self.return_date,
+                "停留天数": stay_days,
+                "方案序号": index,
+                "携程行程ID": itinerary.get("itineraryId", ""),
+                "价格说明": "携程首轮响应中的往返总价",
+                "回程明细状态": inbound_detail_status,
+            }
+            record.update(price_info)
+            record.update({f"去程{key}": value for key, value in outbound_info.items()})
+            record.update({f"回程{key}": value for key, value in inbound_info.items()})
+            self.records.append(record)
+
+    def write_roundtrip_data(self):
+        try:
+            if self.query_mode == "open_jaw":
+                normalized_records = []
+                for record in self.records:
+                    normalized_records.append({column: record.get(column, "") for column in OPEN_JAW_COLUMNS})
+                self.df = pd.DataFrame(normalized_records, columns=OPEN_JAW_COLUMNS)
+                filename = open_jaw_raw_result_file_path(
+                    self.city[1],
+                    self.return_departure_city,
+                    self.date,
+                    self.return_date,
+                )
+            else:
+                self.df = pd.DataFrame(self.records)
+                filename = result_file_path(self.city, self.date, self.return_date)
+            files_dir = os.path.dirname(filename)
+            if not os.path.exists(files_dir):
+                os.makedirs(files_dir)
+
+            self.df.to_csv(filename, encoding="UTF-8", index=False)
+            append_result_file(filename)
+            if self.query_mode == "open_jaw":
+                group_file = write_open_jaw_group_results(self.city[1], self.return_departure_city)
+                if group_file:
+                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 开口程汇总文件已更新 {group_file}')
+
+            print(f'\n{time.strftime("%Y-%m-%d_%H-%M-%S")} 数据查询完成 {filename} 行数：{len(self.df)}\n')
+            return filename
+
+        except Exception as e:
+            print(f"写入往返数据失败 {str(e)}")
+            print(f"错误类型: {type(e).__name__}")
+            print(f"错误详情: {str(e)}")
+            import traceback
+            print(f"错误堆栈: {traceback.format_exc()}")
+            raise
 
     def proc_flightSegments(self):
         self.flights = pd.DataFrame()
@@ -1536,36 +2275,60 @@ class DataFetcher(object):
             return None
 
 
-if __name__ == "__main__":
-
+def run_queries(citys=None, date_pairs=None):
     driver = init_driver()
 
-    citys = crawl_routes
+    if citys is None:
+        citys = crawl_routes
 
-    flight_dates = generate_flight_dates(crawl_days, begin_date, end_date, start_interval, days_interval)
+    if date_pairs is None:
+        date_pairs = generate_round_trip_dates(begin_date, end_date, min_stay_days, days_interval)
+
+    print(
+        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 本轮计划查询：{len(citys)} 条航线，{len(date_pairs)} 个往返日期组合，共 {len(citys) * len(date_pairs)} 组'
+    )
 
     Flight_DataFetcher = DataFetcher(driver)
 
     for city in citys:
         Flight_DataFetcher.city = city
 
-        for flight_date in flight_dates:
-            Flight_DataFetcher.date = flight_date
+        for depart_date, return_date in date_pairs:
+            Flight_DataFetcher.date = depart_date
+            Flight_DataFetcher.return_date = return_date
 
-            if os.path.exists(os.path.join(os.getcwd(), flight_date, dt.now().strftime("%Y-%m-%d"), f"{city[0]}-{city[1]}.csv")):
-                existing_file = os.path.join(os.getcwd(), flight_date, dt.now().strftime("%Y-%m-%d"), f"{city[0]}-{city[1]}.csv")
-                append_result_file(existing_file)
+            output_file = result_file_path(city, depart_date, return_date)
+            if os.path.exists(output_file):
+                existing_df = pd.read_csv(output_file)
+                has_success = "状态" in existing_df.columns and (existing_df["状态"] == "成功").any()
+                has_price = (
+                    "往返含税价" in existing_df.columns
+                    and existing_df["往返含税价"].notna().any()
+                    and (existing_df["往返含税价"].astype(str) != "").any()
+                )
+                if has_success and has_price:
+                    existing_file = output_file
+                    append_result_file(existing_file)
+                    print(
+                        f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 成功结果文件已存在:{existing_file}')
+                    continue
                 print(
-                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 文件已存在:{existing_file}')
-                continue
-            elif ('http' not in Flight_DataFetcher.driver.current_url):
-                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前的URL是：{driver.current_url}')
-                # 初始化页面
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 已存在文件不是成功结果，将重新查询:{output_file}')
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 当前的URL是：{driver.current_url}')
+            try:
                 Flight_DataFetcher.get_page(1)
+            except Exception as e:
+                error_message = f"查询异常：{type(e).__name__}, {str(e).split('Stacktrace:')[0].strip()}"
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} {city[0]}-{city[1]} {depart_date}-{return_date} {error_message}')
+                Flight_DataFetcher.records = [Flight_DataFetcher.build_no_result_record(error_message)]
+                Flight_DataFetcher.write_roundtrip_data()
 
-            else:
-                # 后续运行只需更换出发与目的地
-                Flight_DataFetcher.change_city()
+            if not os.path.exists(output_file):
+                print(
+                    f'{time.strftime("%Y-%m-%d_%H-%M-%S")} {city[0]}-{city[1]} {depart_date}-{return_date} 未生成结果文件，写入失败记录'
+                )
+                Flight_DataFetcher.records = [Flight_DataFetcher.build_no_result_record("页面查询未生成结果")]
+                Flight_DataFetcher.write_roundtrip_data()
 
             time.sleep(crawl_interval)
 
@@ -1576,9 +2339,39 @@ if __name__ == "__main__":
     except Exception as e:
         print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} An error occurred while quitting the driver: {e}')
 
-    try:
-        send_result_email(result_files)
-    except Exception as e:
-        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 机票结果邮件发送失败：{type(e).__name__}, {e}')
+    combined_file = write_combined_results(result_files)
+    if combined_file:
+        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 汇总文件已生成：{combined_file}')
+
+    if send_email_after_run and combined_file:
+        try:
+            send_result_email([combined_file])
+        except Exception as e:
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 机票结果邮件发送失败：{type(e).__name__}, {e}')
+    else:
+        print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 邮件自动发送已关闭，请先向 lyx 展示邮件预览和附件清单')
 
     print(f'\n{time.strftime("%Y-%m-%d_%H-%M-%S")} 程序运行完成！！！！')
+
+    return combined_file
+
+
+def open_manual_login():
+    driver = init_driver()
+    try:
+        driver.get("https://flights.ctrip.com/online/channel/domestic")
+        WebDriverWait(driver, max_wait_time).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
+        )
+        fetcher = DataFetcher(driver)
+        fetcher.wait_for_manual_login()
+    finally:
+        driver.quit()
+
+
+def main():
+    return run_queries()
+
+
+if __name__ == "__main__":
+    main()

@@ -8,28 +8,58 @@
 - 上下文接近满、发生压缩、或需要切换到新 Agent 时，必须先生成交接摘要，再让下一个 Agent 接手；新 Agent 必须先读取交接摘要与上下文文件，禁止从头猜测。
 
 # 当前目标
-把 `D:\PythonProject\Ctrip-Crawler` 跑起来，获取上海出发到香港、9 月 25 日到 10 月 7 日的机票价格，并将获取结果发送到 lyx 指定邮箱。
+根据 README 在项目内创建虚拟环境，不使用系统 Python，配置并运行携程机票价格脚本；查询从上海出发到欧洲主要机场、包含中转航班、`2026-09-25` 至 `2026-10-10` 区间内的价格；最终结果落 CSV，并在 lyx 确认后发送到邮箱。
+
+# 当前阶段
+全量同城往返查询执行阶段。lyx 已要求在开口程试跑成功后，继续用正式脚本查询上海到欧洲各城市在 `2026-09-25` 至 `2026-10-10` 时间段、停留至少 9 天的往返价格；脚本正在低频运行，我只读取脚本输出与结果文件。
 
 # 已验证状态
-- 已读取 `README.md`、`requirements.txt`、`Linux_version/readme.md`、`Linux_version/requirements.txt`。
-- Windows 版 README 要求：Python 3.6+，安装根目录 `requirements.txt`，配置浏览器驱动，运行主脚本。
-- 根目录依赖包含 Windows 条件依赖 `python-magic-bin==0.4.14`。
-- 当前普通 PowerShell profile 调用 `D:\anaconda3\Scripts\conda.exe` 报“拒绝访问”；提升权限后 conda 可运行。
-- 系统可见 Python：`D:\anaconda3\python.exe`、`C:\Program Files\Python37\python.exe`、`C:\Python27\python.exe`、`C:\msys64\mingw64\bin\python.exe`。
-- 已确认 `D:\anaconda3\envs\pyvenv.cfg` 错误指向 `D:\anaconda3\envs\pytorch`，导致 `ctrip` 环境 `sys.prefix`/`sys.path` 串到 pytorch。
-- 已将该父目录 `pyvenv.cfg` 改名备份为 `D:\anaconda3\envs\pyvenv.cfg.bak-codex-20260513`。
-- 已验证 `ctrip` 环境恢复：`sys.prefix == D:\anaconda3\envs\ctrip`，`unicodedata` 可导入，`python -m pip --version` 成功。
-- 已安装项目依赖并修复 `selenium-wire` 对 `pkg_resources` 的依赖问题。
-- 已验证 Edge WebDriver 可启动。
-- 已将采集配置限定为上海 -> 香港，2026-09-25 至 2026-10-07。
-- 已加入程序结束后统一发送结果 CSV 附件的邮件逻辑。
-- 已按 lyx 要求降低页面失败刷新频率。
-- 已修复 SeleniumWire 与 pyOpenSSL/cryptography 版本不兼容问题；SeleniumWire 单次访问携程首页成功。
+- 已创建/复用 `.codex/` 过程目录。
+- 已使用 uv Python `3.12.13` 创建项目内 `.venv`，并安装 `requirements.txt` 依赖。
+- 已将脚本从 Edge 调整为 Chrome；Chrome WebDriver 最小启动验证通过。
+- 已加入手动登录并缓存携程 cookies 的流程；lyx 已完成一次网页登录，脚本已保存本地 `cookies.json`，后续运行会复用。
+- 已将 `.venv/`、`cookies.json`、`results/` 加入 `.gitignore`。
+- 往返日期规则确定：去程出发日期和回程出发日期都在 `2026-09-25` 至 `2026-10-10` 内，停留天数至少 9 天，共 28 个日期组合；22 个目的地共 616 组。
+- 正式查询流程已调整为页面流程：搜索后选择去程“低价优先”，读取第一条并点“选为去程”；进入返程页后选择返程“低价优先”，读取第一条“订票”对应的往返含税价；不点击“订票”。
+- 低价优先按钮已定位为 `li.sort-item.ticket-price`；当前代码会点击后等待该按钮进入 `active` 状态。
+- 上海 -> 巴黎，去程 `2026-09-25`、回程 `2026-10-04` 单组合已成功生成 CSV，往返含税价 `10452`，排序方式记录为“去程低价优先；返程低价优先”。
+- 巴黎 28 组当前已成功 21 组，失败 2 组，未跑 5 组。低频补跑中连续两次首页控件 60 秒未挂载后已停止。
+- 最新检查发现当前 `results/` 目录内此前生成的巴黎 CSV 已不存在，仅剩 `.DS_Store`；全局未找到巴黎 CSV 或汇总 CSV。
+- 正式 runner `run_flight_job.py` 已创建并编译通过，但因旧结果文件缺失，启动后会从巴黎 28 组开始跑。
+- 已新增开口程模式：`run_flight_job.py --open-jaw 巴黎 米兰` 会查询 `上海 -> 巴黎`、`米兰 -> 上海` 的 28 个日期组合。
+- 开口程会生成同一城市对的 group CSV，并按 `往返含税价` 从高到低排序。
+- 开口程当前只做过非网络队列与 CSV 汇总验证，尚未实际打开携程多程页验证页面选择器。
+- 已派发两个只读子 Agent：A 审阅开口程 UI/runner 链路，B 审阅 CSV 输出与提交边界；两者均禁止运行浏览器、访问携程或修改文件。
+- 已根据子 Agent A/B 反馈修复：
+  - open_jaw 的 `batchSearch` 请求匹配改为第二段 `返程出发城市 -> 上海`。
+  - 开口程不再用第一程价格兜成总价；第二程未读到价格时写失败记录。
+  - open_jaw raw/group CSV 使用固定列，失败记录也补齐价格与展示字段。
+  - runner 在无待执行 open_jaw 任务和任务结束时都会刷新 group CSV。
+  - runner 固定本轮输出日期目录，避免长任务跨午夜拆散结果。
+  - runner 区分“无航班结果”和技术失败，避免业务无结果触发连续失败停机。
+  - `.gitignore` 已忽略 `.DS_Store`、`.codex/flight_job.log`、`.codex/flight_job_status.json`。
+- `ctrip_flights_scraper_V3.py` 已通过 `.venv/bin/python -m py_compile`。
+- `run_flight_job.py` 已通过 `.venv/bin/python -m py_compile`，`--help` 正常展示 `--open-jaw`。
+- 离线验证 `build_open_jaw_tasks([['巴黎', '米兰']], force=True)` 生成 28 个日期组合。
+- 离线验证 open_jaw group CSV 会按 `往返含税价` 从高到低排序。
+- 当前脚本不自动发邮件；实际发送前必须向 lyx 展示收件人、主题、正文摘要和附件清单并获得确认。
 
 # 下一步动作
-- 实际运行爬虫直到获取票价，或停在必须人工处理的登录/验证码/网站限制点。
+- 继续监控正在运行的正式 runner：`.venv/bin/python run_flight_job.py --all-cities --interval 180 --max-wait 90 --max-search-wait 180 --max-consecutive-failures 5`。
+- 当前本轮 roundtrip 待执行 610 组，已成功 2 组，失败 0 组；runner 会跳过此前已成功的 6 个伦敦结果。
+- 开口程低频真实试跑已通过：`run_flight_job.py --open-jaw 巴黎 米兰 --force --limit 1` 成功查询 `上海 -> 巴黎 / 米兰 -> 上海`，去程 `2026-09-25`、回程 `2026-10-04`，页面多程含税价 `9925`。
+- 已确认新版携程多程 DOM：
+  - 多程入口为 `多程(含缺口程)`。
+  - 多程城市输入为 `.form-input-v2`，稳定 name 为 `mtDCity1/mtACity1/mtDCity2/mtACity2`。
+  - 多程日期格为 `.date-day`，日期字段在 `data-testid`。
+  - 结果页没有旧版 `.segment_tab.active` 切换；选择第一程后页面直接显示“第二程”，第二程首条带 `订票` 和 `多程含税价`。
+- 开口程 raw CSV 和 group CSV 已生成：
+  - `results/2026-09-25_to_2026-10-10/2026-05-13/open_jaw/raw/上海-巴黎__米兰-上海_2026-09-25_return_2026-10-04.csv`
+  - `results/2026-09-25_to_2026-10-10/2026-05-13/open_jaw/上海-巴黎__米兰-上海.csv`
+- runner 若检测到验证码/风控或连续失败达到阈值，将自动停止。
+- 生成汇总 CSV 后，先向 lyx 展示邮件预览和附件清单，确认后再发送。
+- 生成汇总 CSV 后，先向 lyx 展示邮件预览和附件清单，确认后再发送。
 
 # 阻塞项
-- 普通沙箱内执行 conda 仍可能受权限限制，环境修复/依赖安装需在已授权的提升权限命令中进行。
-- 日期年份待 lyx 确认；如无异议，按当前日期后的最近区间理解为 2026-09-25 至 2026-10-07。
-- 真实爬虫运行可能触发携程登录、验证码、浏览器驱动版本匹配、网络访问限制；遇到账号/验证码/驱动选择等需要 lyx 决策的点会暂停确认。
+- 当前暂无阻塞；如 runner 检测到验证码/风控会自动停止。
+- 实际发送邮件前还需二次确认邮件预览。
