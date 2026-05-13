@@ -246,3 +246,10 @@
   - `.venv/bin/python run_flight_job.py --help` 只展示 CLI 参数，不启动查询。
   - 导入 `run_flight_job` 与 `ctrip_flights_scraper_V3` 只检查到函数存在，不启动 Chrome。
 - 提交前确认 `results/`、`cookies.json`、`.venv/` 均未纳入 Git。
+
+## 2026-05-14 runner 技术失败恢复
+- 提交后恢复全量查询，runner 从 608 个待执行组合继续。
+- 已成功补跑 `上海-伦敦 2026-09-26 -> 2026-10-06`。
+- 随后连续 5 组卡在首页控件等待，均属于技术失败，不是验证码，也不是业务无航班结果；runner 按阈值停止并生成汇总 CSV。
+- 已修正 `run_flight_job.py`：遇到技术失败时明确记录并重启浏览器会话后继续下一组，避免同一个 Chrome 会话在失败后持续卡住。
+- 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过；`.venv/bin/python run_flight_job.py --help` 正常。

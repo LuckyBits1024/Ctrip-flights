@@ -143,6 +143,16 @@ def write_failure(fetcher, reason):
     fetcher.write_roundtrip_data()
 
 
+def restart_fetcher(fetcher):
+    try:
+        fetcher.driver.quit()
+    except Exception as e:
+        log(f"重启浏览器前关闭旧 driver 失败：{type(e).__name__}: {e}")
+
+    driver = scraper.init_driver()
+    return driver, scraper.DataFetcher(driver)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="低频执行携程往返机票查询任务队列")
     parser.add_argument("--cities", nargs="+", default=["巴黎"], help="目的地城市列表")
@@ -215,6 +225,7 @@ def run_flight_job(args):
 
     try:
         for index, task in enumerate(tasks, start=1):
+            technical_failure = False
             fetcher.city = task["route"]
             fetcher.date = task["depart_date"]
             fetcher.return_date = task["return_date"]
@@ -246,6 +257,7 @@ def run_flight_job(args):
                 except Exception as screenshot_error:
                     log(f"错误截图保存失败：{type(screenshot_error).__name__}: {screenshot_error}")
                 write_failure(fetcher, reason)
+                technical_failure = True
 
             if fetcher.captcha_detected:
                 reason = "验证码或风控触发，runner 停止执行"
@@ -275,6 +287,7 @@ def run_flight_job(args):
                 else:
                     consecutive_failures += 1
                     status["failed_this_run"] += 1
+                    technical_failure = True
                     log(f"失败：open_jaw group 汇总未生成，连续失败 {consecutive_failures}/{args.max_consecutive_failures}")
             elif is_business_no_result(task["output_file"]):
                 consecutive_failures = 0
@@ -286,6 +299,7 @@ def run_flight_job(args):
                 status["failed_this_run"] += 1
                 if not os.path.exists(task["output_file"]):
                     write_failure(fetcher, "runner 未生成结果文件")
+                technical_failure = True
                 log(f"失败：连续失败 {consecutive_failures}/{args.max_consecutive_failures}")
 
             write_status(status)
@@ -297,6 +311,10 @@ def run_flight_job(args):
                 write_status(status)
                 log(reason)
                 break
+
+            if technical_failure:
+                log("本组技术失败，重启浏览器会话后继续下一组")
+                driver, fetcher = restart_fetcher(fetcher)
 
             if index < len(tasks):
                 log(f"等待 {args.interval} 秒后继续下一组")
