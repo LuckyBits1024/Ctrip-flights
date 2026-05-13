@@ -253,3 +253,4 @@
 - 随后连续 5 组卡在首页控件等待，均属于技术失败，不是验证码，也不是业务无航班结果；runner 按阈值停止并生成汇总 CSV。
 - 已修正 `run_flight_job.py`：遇到技术失败时明确记录并重启浏览器会话后继续下一组，避免同一个 Chrome 会话在失败后持续卡住。
 - 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过；`.venv/bin/python run_flight_job.py --help` 正常。
+- 跨午夜后发现 runner 默认使用当天日期目录，误切到 `2026-05-14` 结果目录；已新增 `--run-day` 参数，后续继续查询时固定 `--run-day 2026-05-13`，复用原结果目录跳过已有成功结果。

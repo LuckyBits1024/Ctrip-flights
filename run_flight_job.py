@@ -169,12 +169,13 @@ def parse_args():
     parser.add_argument("--max-search-wait", type=int, default=180, help="结果页等待秒数")
     parser.add_argument("--max-consecutive-failures", type=int, default=2, help="连续失败达到该值后停止")
     parser.add_argument("--limit", type=int, default=0, help="本次最多执行的任务数，0 表示不限制")
+    parser.add_argument("--run-day", default="", help="结果输出日期目录，默认使用当天日期")
     parser.add_argument("--force", action="store_true", help="忽略已有成功结果，重新执行全部任务")
     return parser.parse_args()
 
 
 def run_flight_job(args):
-    run_day = dt.now().strftime("%Y-%m-%d")
+    run_day = args.run_day or dt.now().strftime("%Y-%m-%d")
     scraper.set_result_run_day(run_day)
     cities = scraper.destination_citys if args.all_cities else args.cities
     open_jaw_pairs = args.open_jaw or []

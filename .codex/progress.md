@@ -47,6 +47,7 @@
 # 下一步动作
 - 继续监控正在运行的正式 runner：`.venv/bin/python run_flight_job.py --all-cities --interval 180 --max-wait 90 --max-search-wait 180 --max-consecutive-failures 5`。
 - 最近一次 roundtrip 从 608 组继续，已成功补跑 1 组后连续 5 组首页控件等待超时并自动停止；已修正 runner，使技术失败后重启浏览器会话再继续下一组。
+- 跨午夜后 runner 默认输出日期会变为当天，已新增 `--run-day` 参数；继续查询需固定 `--run-day 2026-05-13` 以复用原结果目录。
 - 开口程低频真实试跑已通过：`run_flight_job.py --open-jaw 巴黎 米兰 --force --limit 1` 成功查询 `上海 -> 巴黎 / 米兰 -> 上海`，去程 `2026-09-25`、回程 `2026-10-04`，页面多程含税价 `9925`。
 - 已确认新版携程多程 DOM：
   - 多程入口为 `多程(含缺口程)`。
