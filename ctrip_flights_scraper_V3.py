@@ -21,7 +21,6 @@ origin_city = "上海"
 
 # 爬取的欧洲主要城市
 destination_citys = [
-    "伦敦",
     "巴黎",
     "法兰克福",
     "阿姆斯特丹",

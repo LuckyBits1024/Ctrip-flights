@@ -254,3 +254,8 @@
 - 已修正 `run_flight_job.py`：遇到技术失败时明确记录并重启浏览器会话后继续下一组，避免同一个 Chrome 会话在失败后持续卡住。
 - 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过；`.venv/bin/python run_flight_job.py --help` 正常。
 - 跨午夜后发现 runner 默认使用当天日期目录，误切到 `2026-05-14` 结果目录；已新增 `--run-day` 参数，后续继续查询时固定 `--run-day 2026-05-13`，复用原结果目录跳过已有成功结果。
+
+## 2026-05-14 目的地口径更新
+- lyx 最新要求：英国不纳入本次欧洲目的地范围。
+- 已暂停仍包含伦敦的 runner，并从 `destination_citys` 移除 `伦敦`。
+- 已生成的伦敦结果文件保留在 ignored 的 `results/` 中，不纳入提交；后续默认全量只跑 21 个非英国目的地。
