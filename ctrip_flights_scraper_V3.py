@@ -54,7 +54,7 @@ begin_date = '2026-09-25'
 end_date = '2026-10-10'
 
 # 往返最短间隔天数
-min_stay_days = 8
+min_stay_days = 7
 
 # 爬取T+N，即N天后
 start_interval = 1
@@ -319,6 +319,7 @@ def open_jaw_group_result_file_path(outbound_destination, return_departure_city)
     return os.path.join(files_dir, filename)
 
 def write_open_jaw_group_results(outbound_destination, return_departure_city):
+    group_file = open_jaw_group_result_file_path(outbound_destination, return_departure_city)
     pattern = os.path.join(
         os.getcwd(),
         "results",
@@ -330,6 +331,13 @@ def write_open_jaw_group_results(outbound_destination, return_departure_city):
     )
     files = sorted(glob.glob(pattern))
     frames = []
+    if os.path.exists(group_file):
+        frame = pd.read_csv(group_file)
+        for column in OPEN_JAW_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = ""
+        frames.append(frame[OPEN_JAW_COLUMNS])
+
     for path in files:
         if os.path.exists(path):
             frame = pd.read_csv(path)
@@ -342,9 +350,9 @@ def write_open_jaw_group_results(outbound_destination, return_departure_city):
         return None
 
     combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["去程出发日期", "回程出发日期"], keep="last")
     combined = sort_by_price(combined)
 
-    group_file = open_jaw_group_result_file_path(outbound_destination, return_departure_city)
     files_dir = os.path.dirname(group_file)
     if not os.path.exists(files_dir):
         os.makedirs(files_dir)
@@ -1861,13 +1869,26 @@ class DataFetcher(object):
                 normalized_records = []
                 for record in self.records:
                     normalized_records.append({column: record.get(column, "") for column in OPEN_JAW_COLUMNS})
-                self.df = pd.DataFrame(normalized_records, columns=OPEN_JAW_COLUMNS)
-                filename = open_jaw_raw_result_file_path(
+                new_frame = pd.DataFrame(normalized_records, columns=OPEN_JAW_COLUMNS)
+                filename = open_jaw_group_result_file_path(
                     self.city[1],
                     self.return_departure_city,
-                    self.date,
-                    self.return_date,
                 )
+                if os.path.exists(filename):
+                    existing_frame = pd.read_csv(filename)
+                    for column in OPEN_JAW_COLUMNS:
+                        if column not in existing_frame.columns:
+                            existing_frame[column] = ""
+                    existing_frame = existing_frame[OPEN_JAW_COLUMNS]
+                    same_date = (
+                        (existing_frame["去程出发日期"].astype(str) == self.date)
+                        & (existing_frame["回程出发日期"].astype(str) == self.return_date)
+                    )
+                    existing_frame = existing_frame[~same_date]
+                    self.df = pd.concat([existing_frame, new_frame], ignore_index=True)
+                else:
+                    self.df = new_frame
+                self.df = sort_by_price(self.df)
             else:
                 new_frame = pd.DataFrame(self.records)
                 filename = result_file_path(self.city, self.date, self.return_date)
@@ -1889,9 +1910,7 @@ class DataFetcher(object):
             self.df.to_csv(filename, encoding="UTF-8", index=False)
             append_result_file(filename)
             if self.query_mode == "open_jaw":
-                group_file = write_open_jaw_group_results(self.city[1], self.return_departure_city)
-                if group_file:
-                    print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 开口程汇总文件已更新 {group_file}')
+                print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 开口程航线文件已更新 {filename}')
 
             print(f'\n{time.strftime("%Y-%m-%d_%H-%M-%S")} 数据查询完成 {filename} 行数：{len(self.df)}\n')
             return filename

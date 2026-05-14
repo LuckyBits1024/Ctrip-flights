@@ -118,6 +118,27 @@ def build_roundtrip_tasks(cities, force=False):
     return tasks
 
 
+def build_all_open_jaw_pairs(cities):
+    return [
+        [outbound_destination, return_departure_city]
+        for outbound_destination in cities
+        for return_departure_city in cities
+        if outbound_destination != return_departure_city
+    ]
+
+
+def unique_open_jaw_pairs(pairs):
+    unique_pairs = []
+    seen = set()
+    for outbound_destination, return_departure_city in pairs:
+        key = (outbound_destination, return_departure_city)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_pairs.append([outbound_destination, return_departure_city])
+    return unique_pairs
+
+
 def build_open_jaw_tasks(pairs, force=False):
     date_pairs = scraper.generate_round_trip_dates(
         scraper.begin_date,
@@ -129,11 +150,9 @@ def build_open_jaw_tasks(pairs, force=False):
     for outbound_destination, return_departure_city in pairs:
         route = [scraper.origin_city, outbound_destination]
         for depart_date, return_date in date_pairs:
-            output_file = scraper.open_jaw_raw_result_file_path(
+            output_file = scraper.open_jaw_group_result_file_path(
                 outbound_destination,
                 return_departure_city,
-                depart_date,
-                return_date,
             )
             if force or not is_completed_result(output_file, depart_date, return_date):
                 tasks.append(
@@ -246,6 +265,7 @@ def parse_args():
         metavar=("OUTBOUND_DESTINATION", "RETURN_DEPARTURE_CITY"),
         help="开口程城市对，例如：--open-jaw 巴黎 米兰 表示上海->巴黎、米兰->上海",
     )
+    parser.add_argument("--all-open-jaw", action="store_true", help="查询全部欧洲城市有序开口程组合，排除进出同城")
     parser.add_argument("--min-interval", type=int, default=180, help="每组查询后的最短等待秒数")
     parser.add_argument("--max-interval", type=int, default=300, help="每组查询后的最长等待秒数")
     parser.add_argument("--max-wait", type=int, default=60, help="首页控件等待秒数")
@@ -263,6 +283,9 @@ def run_flight_job(args):
     scraper.set_result_run_day(run_day)
     cities = scraper.destination_citys if args.all_cities else args.cities
     open_jaw_pairs = args.open_jaw or []
+    if args.all_open_jaw:
+        open_jaw_pairs = build_all_open_jaw_pairs(scraper.destination_citys) + open_jaw_pairs
+    open_jaw_pairs = unique_open_jaw_pairs(open_jaw_pairs)
 
     scraper.crawl_interval = args.max_interval
     scraper.max_wait_time = args.max_wait
@@ -274,7 +297,7 @@ def run_flight_job(args):
 
     if open_jaw_pairs:
         tasks = build_open_jaw_tasks(open_jaw_pairs, force=args.force)
-        run_label = [f"{pair[0]}<-{pair[1]}" for pair in open_jaw_pairs]
+        run_label = f"all_open_jaw:{len(open_jaw_pairs)} pairs" if args.all_open_jaw else [f"{pair[0]}<-{pair[1]}" for pair in open_jaw_pairs]
         run_mode = "open_jaw"
     else:
         tasks = build_roundtrip_tasks(cities, force=args.force)
