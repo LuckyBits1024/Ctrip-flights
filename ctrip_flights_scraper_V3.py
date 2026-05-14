@@ -537,17 +537,17 @@ class DataFetcher(object):
         print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 已加载本地携程 cookies")
 
     def wait_for_manual_login(self):
-        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 请在弹出的 Chrome 中完成携程登录")
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 请在弹出的 Chrome 中完成携程登录", flush=True)
         deadline = time.time() + manual_login_wait_seconds
         while time.time() < deadline:
             cookie_names = {cookie.get("name") for cookie in self.driver.get_cookies()}
             if any(cookie_name in cookie_names for cookie_name in REQUIRED_COOKIES) and not self.has_login_modal():
                 self.save_current_manual_cookies()
-                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 检测到登录完成")
+                print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 检测到登录完成", flush=True)
                 return True
             time.sleep(5)
 
-        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 等待登录超时")
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 等待登录超时", flush=True)
         return False
 
     def delete_cookies(self, account):
@@ -2388,10 +2388,10 @@ def run_queries(citys=None, date_pairs=None):
 def open_manual_login():
     driver = init_driver()
     try:
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 正在打开携程机票页面", flush=True)
+        driver.set_page_load_timeout(max_wait_time * 2)
         driver.get("https://flights.ctrip.com/online/channel/domestic")
-        WebDriverWait(driver, max_wait_time).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "pc_home-jipiao"))
-        )
+        print(f"{time.strftime('%Y-%m-%d_%H-%M-%S')} manual_login: 携程机票页面已打开", flush=True)
         fetcher = DataFetcher(driver)
         fetcher.wait_for_manual_login()
     finally:

@@ -278,3 +278,15 @@
 - 11:28 错误截图确认携程出现“为保障您的安全访问，依次点击图标验证”的安全验证弹窗。
 - 已改为触发安全验证时保持 Chrome 打开，并通过 `--manual-verification-wait` 等待 lyx 手动完成验证；验证解除后重跑当前查询组合。
 - 不代点验证码，不自动绕过风控。
+
+## 2026-05-14 新账号登录态与重新查询
+- lyx 反馈已换账号重新登录，要求重新查询。
+- 检查发现 `cookies.json` 仍为 `2026-05-13 15:26:04`，说明普通 Chrome 登录未同步到脚本专用 Selenium 无痕会话。
+- 旧 `open_manual_login()` 进程已退出且未写入 cookies；原因是脚本专用 Chrome 等待登录态超时。
+- 已收敛 `open_manual_login()`：去掉对旧首页 class `pc_home-jipiao` 的阻塞等待，并增加必要的登录入口进度输出与页面加载超时。
+- 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过。
+- 重新启动全量同城往返查询：
+  `.venv/bin/python run_flight_job.py --all-cities --run-day 2026-05-14 --min-interval 180 --max-interval 300 --max-wait 90 --max-search-wait 180 --max-consecutive-failures 5 --manual-verification-wait 1800`
+- runner 启动范围：21 个非英国欧洲目的地，待执行 580 组，随机间隔 `180-300s`。
+- 首组 `上海-巴黎 2026-09-26 -> 2026-10-05` 已成功写入 `results/2026-09-25_to_2026-10-10/2026-05-14/上海-巴黎.csv`，当前航线文件 10 行，按 `往返含税价` 升序排序；无法读取价格的记录排在最后。
+- 当前 runner 正在按低频等待下一组；如检测到验证码/风控，会保持浏览器打开并等待 lyx 手动完成验证。
