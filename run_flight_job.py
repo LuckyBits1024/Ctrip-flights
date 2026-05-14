@@ -164,6 +164,46 @@ def write_failure(fetcher, reason):
     fetcher.write_roundtrip_data()
 
 
+def run_query_once(fetcher):
+    try:
+        fetcher.get_page(1)
+        return False
+    except Exception as e:
+        reason = f"runner 查询异常：{type(e).__name__}, {str(e).split('Stacktrace:')[0].strip()}"
+        log(reason)
+        try:
+            os.makedirs(".codex", exist_ok=True)
+            fetcher.driver.save_screenshot(ERROR_SCREENSHOT_FILE)
+            log(f"错误截图已保存：{ERROR_SCREENSHOT_FILE}")
+        except Exception as screenshot_error:
+            log(f"错误截图保存失败：{type(screenshot_error).__name__}: {screenshot_error}")
+        try:
+            if fetcher.has_verification_challenge():
+                fetcher.captcha_detected = True
+                log("检测到携程安全验证弹窗")
+                return False
+        except Exception as challenge_error:
+            log(f"安全验证检测失败：{type(challenge_error).__name__}: {challenge_error}")
+        write_failure(fetcher, reason)
+        return True
+
+
+def wait_for_manual_verification(fetcher, wait_seconds):
+    deadline = time.time() + wait_seconds
+    log(f"请 lyx 在当前 Chrome 窗口手动完成携程安全验证，最多等待 {wait_seconds} 秒")
+    while time.time() < deadline:
+        try:
+            if not fetcher.has_verification_challenge():
+                fetcher.save_current_manual_cookies()
+                log("携程安全验证已解除")
+                return True
+        except Exception as e:
+            log(f"检查安全验证状态失败：{type(e).__name__}: {e}")
+            return False
+        time.sleep(5)
+    return False
+
+
 def close_fetcher(fetcher):
     if fetcher is None:
         return
@@ -184,13 +224,14 @@ def parse_args():
         metavar=("OUTBOUND_DESTINATION", "RETURN_DEPARTURE_CITY"),
         help="开口程城市对，例如：--open-jaw 巴黎 米兰 表示上海->巴黎、米兰->上海",
     )
-    parser.add_argument("--min-interval", type=int, default=120, help="每组查询后的最短等待秒数")
-    parser.add_argument("--max-interval", type=int, default=180, help="每组查询后的最长等待秒数")
+    parser.add_argument("--min-interval", type=int, default=180, help="每组查询后的最短等待秒数")
+    parser.add_argument("--max-interval", type=int, default=300, help="每组查询后的最长等待秒数")
     parser.add_argument("--max-wait", type=int, default=60, help="首页控件等待秒数")
     parser.add_argument("--max-search-wait", type=int, default=180, help="结果页等待秒数")
     parser.add_argument("--max-consecutive-failures", type=int, default=2, help="连续失败达到该值后停止")
     parser.add_argument("--limit", type=int, default=0, help="本次最多执行的任务数，0 表示不限制")
     parser.add_argument("--run-day", default="", help="结果输出日期目录，默认使用当天日期")
+    parser.add_argument("--manual-verification-wait", type=int, default=900, help="触发安全验证时等待人工处理的秒数")
     parser.add_argument("--force", action="store_true", help="忽略已有成功结果，重新执行全部任务")
     return parser.parse_args()
 
@@ -228,6 +269,7 @@ def run_flight_job(args):
         "failed_this_run": 0,
         "stopped": False,
         "stop_reason": "",
+        "waiting_for_manual_verification": False,
     }
     write_status(status)
     log(
@@ -273,23 +315,32 @@ def run_flight_job(args):
                     f"{task['depart_date']} -> {task['return_date']}"
                 )
 
-            try:
-                fetcher.get_page(1)
-            except Exception as e:
-                reason = f"runner 查询异常：{type(e).__name__}, {str(e).split('Stacktrace:')[0].strip()}"
-                log(reason)
-                try:
-                    os.makedirs(".codex", exist_ok=True)
-                    fetcher.driver.save_screenshot(ERROR_SCREENSHOT_FILE)
-                    log(f"错误截图已保存：{ERROR_SCREENSHOT_FILE}")
-                except Exception as screenshot_error:
-                    log(f"错误截图保存失败：{type(screenshot_error).__name__}: {screenshot_error}")
-                write_failure(fetcher, reason)
-                technical_failure = True
+            technical_failure = run_query_once(fetcher)
 
             if fetcher.captcha_detected:
-                reason = "验证码或风控触发，runner 停止执行"
-                write_failure(fetcher, reason)
+                reason = "验证码或风控触发，等待 lyx 手动完成验证"
+                status["waiting_for_manual_verification"] = True
+                status["stop_reason"] = reason
+                write_status(status)
+                log(reason)
+                if wait_for_manual_verification(fetcher, args.manual_verification_wait):
+                    status["waiting_for_manual_verification"] = False
+                    status["stop_reason"] = ""
+                    write_status(status)
+                    fetcher.captcha_detected = False
+                    log("人工验证完成，重新执行当前组合")
+                    technical_failure = run_query_once(fetcher)
+                else:
+                    reason = "验证码或风控等待人工处理超时，runner 停止执行"
+                    status["waiting_for_manual_verification"] = False
+                    status["stopped"] = True
+                    status["stop_reason"] = reason
+                    write_status(status)
+                    log(reason)
+                    break
+
+            if fetcher.captcha_detected:
+                reason = "验证码或风控仍未解除，runner 停止执行"
                 status["stopped"] = True
                 status["stop_reason"] = reason
                 write_status(status)

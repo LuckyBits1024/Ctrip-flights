@@ -459,7 +459,7 @@ class DataFetcher(object):
     def check_verification_code(self):
         try:
             # 检查是否有验证码元素，如果有，则需要人工处理
-            if (len(self.driver.find_elements(By.ID, "verification-code")) + len(self.driver.find_elements(By.CLASS_NAME, "alert-title"))):
+            if self.has_verification_challenge():
                 self.captcha_detected = True
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code：验证码或风控被触发，停止当前自动化执行。')
                 return False
@@ -473,6 +473,19 @@ class DataFetcher(object):
                 f'{time.strftime("%Y-%m-%d_%H-%M-%S")} check_verification_code:未知错误，错误类型：{type(e).__name__}, 详细错误信息：{str(e).split("Stacktrace:")[0]}'
             )
             return False
+
+    def has_verification_challenge(self):
+        challenge_texts = [
+            "为保障您的安全访问",
+            "依次点击图标验证",
+            "请完成以下操作",
+        ]
+        if len(self.driver.find_elements(By.ID, "verification-code")):
+            return True
+        if len(self.driver.find_elements(By.CLASS_NAME, "alert-title")):
+            return True
+        page_text = self.driver.page_source
+        return any(text in page_text for text in challenge_texts)
 
     def load_cookies(self, account):
         if os.path.exists(COOKIES_FILE):

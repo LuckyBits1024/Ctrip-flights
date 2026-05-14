@@ -275,3 +275,6 @@
 - 已修正 runner：技术失败后只关闭旧浏览器；下一组真正开始时才新建浏览器并立即导航到携程首页。
 - 已将默认随机间隔改为 `120-180s`。
 - 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过；`.venv/bin/python run_flight_job.py --help` 正常。
+- 11:28 错误截图确认携程出现“为保障您的安全访问，依次点击图标验证”的安全验证弹窗。
+- 已改为触发安全验证时保持 Chrome 打开，并通过 `--manual-verification-wait` 等待 lyx 手动完成验证；验证解除后重跑当前查询组合。
+- 不代点验证码，不自动绕过风控。
