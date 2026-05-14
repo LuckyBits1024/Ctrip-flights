@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 .idea/
 run_*.log
+log/
 .venv/
 cookies.json
 results/

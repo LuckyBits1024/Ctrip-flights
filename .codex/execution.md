@@ -259,3 +259,11 @@
 - lyx 最新要求：英国不纳入本次欧洲目的地范围。
 - 已暂停仍包含伦敦的 runner，并从 `destination_citys` 移除 `伦敦`。
 - 已生成的伦敦结果文件保留在 ignored 的 `results/` 中，不纳入提交；后续默认全量只跑 21 个非英国目的地。
+
+## 2026-05-14 输出结构与频率调整
+- lyx 要求：同一出发地和目的地的不同日期机票放在一个 CSV，不再生成一堆单日期过程文件。
+- 已将普通往返结果路径改为航线级文件，例如 `上海-巴黎.csv`；每次查询同一日期组合时更新该航线文件中的对应行。
+- 航线文件与总汇总文件均按价格升序排序；无法读取价格的记录排在最后。
+- 查询间隔从固定 `180s` 改为 `30-60s` 随机等待，对应 CLI 参数为 `--min-interval` 和 `--max-interval`。
+- 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过；`.venv/bin/python run_flight_job.py --help` 正常。
+- 启动前检查 `results/` 下已经没有旧的单日期过程 CSV。

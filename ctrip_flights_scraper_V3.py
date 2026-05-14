@@ -274,15 +274,23 @@ def generate_round_trip_dates(begin_date, end_date, min_stay_days, days_interval
                 date_pairs.append((depart_date, return_date))
     return date_pairs
 
-def result_file_path(city, depart_date, return_date):
+def result_file_path(city, depart_date=None, return_date=None):
     files_dir = os.path.join(
         os.getcwd(),
         "results",
         f"{begin_date}_to_{end_date}",
         result_run_day,
     )
-    filename = f"{city[0]}-{city[1]}_{depart_date}_return_{return_date}.csv"
+    filename = f"{city[0]}-{city[1]}.csv"
     return os.path.join(files_dir, filename)
+
+def sort_by_price(frame):
+    for column in ["往返含税价", "开口程含税价", "经济舱总价"]:
+        if column in frame.columns:
+            frame["_sort_price"] = pd.to_numeric(frame[column], errors="coerce")
+            frame = frame.sort_values("_sort_price", ascending=True, na_position="last")
+            return frame.drop(columns=["_sort_price"])
+    return frame
 
 def open_jaw_group_key(outbound_destination, return_departure_city):
     return f"{origin_city}-{outbound_destination}__{return_departure_city}-{origin_city}"
@@ -334,10 +342,7 @@ def write_open_jaw_group_results(outbound_destination, return_departure_city):
         return None
 
     combined = pd.concat(frames, ignore_index=True)
-    if "往返含税价" in combined.columns:
-        combined["_sort_price"] = pd.to_numeric(combined["往返含税价"], errors="coerce")
-        combined = combined.sort_values("_sort_price", ascending=False, na_position="last")
-        combined = combined.drop(columns=["_sort_price"])
+    combined = sort_by_price(combined)
 
     group_file = open_jaw_group_result_file_path(outbound_destination, return_departure_city)
     files_dir = os.path.dirname(group_file)
@@ -359,6 +364,7 @@ def write_combined_results(files):
         return None
 
     combined = pd.concat(frames, ignore_index=True)
+    combined = sort_by_price(combined)
     files_dir = os.path.join(
         os.getcwd(),
         "results",
@@ -1837,8 +1843,19 @@ class DataFetcher(object):
                     self.return_date,
                 )
             else:
-                self.df = pd.DataFrame(self.records)
+                new_frame = pd.DataFrame(self.records)
                 filename = result_file_path(self.city, self.date, self.return_date)
+                if os.path.exists(filename):
+                    existing_frame = pd.read_csv(filename)
+                    same_date = (
+                        (existing_frame["去程出发日期"].astype(str) == self.date)
+                        & (existing_frame["回程出发日期"].astype(str) == self.return_date)
+                    )
+                    existing_frame = existing_frame[~same_date]
+                    self.df = pd.concat([existing_frame, new_frame], ignore_index=True)
+                else:
+                    self.df = new_frame
+                self.df = sort_by_price(self.df)
             files_dir = os.path.dirname(filename)
             if not os.path.exists(files_dir):
                 os.makedirs(files_dir)

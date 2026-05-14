@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import random
 import time
 from datetime import datetime as dt
 
@@ -26,7 +27,16 @@ def log(message):
         f.write(line + "\n")
 
 
-def is_success_result(path):
+def rows_for_date(df, depart_date, return_date):
+    if depart_date is None or return_date is None:
+        return df
+    return df[
+        (df["去程出发日期"].astype(str) == depart_date)
+        & (df["回程出发日期"].astype(str) == return_date)
+    ]
+
+
+def is_success_result(path, depart_date=None, return_date=None):
     if not os.path.exists(path):
         return False
     try:
@@ -36,13 +46,14 @@ def is_success_result(path):
         return False
     if df.empty or "状态" not in df.columns or "往返含税价" not in df.columns:
         return False
+    df = rows_for_date(df, depart_date, return_date)
     has_success = (df["状态"] == "成功").any()
     prices = df["往返含税价"].dropna().astype(str)
     has_price = any(price.strip() and price.strip().lower() != "nan" for price in prices)
     return has_success and has_price
 
 
-def is_business_no_result(path):
+def is_business_no_result(path, depart_date=None, return_date=None):
     if not os.path.exists(path):
         return False
     try:
@@ -52,12 +63,22 @@ def is_business_no_result(path):
         return False
     if df.empty or "状态" not in df.columns:
         return False
+    df = rows_for_date(df, depart_date, return_date)
     statuses = df["状态"].dropna().astype(str)
     return any(status == "无航班结果" for status in statuses)
 
 
-def is_completed_result(path):
-    return is_success_result(path) or is_business_no_result(path)
+def has_result_for_date(path, depart_date, return_date):
+    if not os.path.exists(path):
+        return False
+    df = pd.read_csv(path)
+    if df.empty or "去程出发日期" not in df.columns or "回程出发日期" not in df.columns:
+        return False
+    return not rows_for_date(df, depart_date, return_date).empty
+
+
+def is_completed_result(path, depart_date, return_date):
+    return is_success_result(path, depart_date, return_date) or is_business_no_result(path, depart_date, return_date)
 
 
 def write_open_jaw_group_files(pairs):
@@ -82,7 +103,7 @@ def build_roundtrip_tasks(cities, force=False):
         route = [scraper.origin_city, city]
         for depart_date, return_date in date_pairs:
             output_file = scraper.result_file_path(route, depart_date, return_date)
-            if force or not is_completed_result(output_file):
+            if force or not is_completed_result(output_file, depart_date, return_date):
                 tasks.append(
                     {
                         "city": city,
@@ -114,7 +135,7 @@ def build_open_jaw_tasks(pairs, force=False):
                 depart_date,
                 return_date,
             )
-            if force or not is_completed_result(output_file):
+            if force or not is_completed_result(output_file, depart_date, return_date):
                 tasks.append(
                     {
                         "mode": "open_jaw",
@@ -164,7 +185,8 @@ def parse_args():
         metavar=("OUTBOUND_DESTINATION", "RETURN_DEPARTURE_CITY"),
         help="开口程城市对，例如：--open-jaw 巴黎 米兰 表示上海->巴黎、米兰->上海",
     )
-    parser.add_argument("--interval", type=int, default=120, help="每组查询后的等待秒数")
+    parser.add_argument("--min-interval", type=int, default=30, help="每组查询后的最短等待秒数")
+    parser.add_argument("--max-interval", type=int, default=60, help="每组查询后的最长等待秒数")
     parser.add_argument("--max-wait", type=int, default=60, help="首页控件等待秒数")
     parser.add_argument("--max-search-wait", type=int, default=180, help="结果页等待秒数")
     parser.add_argument("--max-consecutive-failures", type=int, default=2, help="连续失败达到该值后停止")
@@ -180,11 +202,13 @@ def run_flight_job(args):
     cities = scraper.destination_citys if args.all_cities else args.cities
     open_jaw_pairs = args.open_jaw or []
 
-    scraper.crawl_interval = args.interval
+    scraper.crawl_interval = args.max_interval
     scraper.max_wait_time = args.max_wait
     scraper.max_search_wait_time = args.max_search_wait
     scraper.max_retry_time = 1
     scraper.send_email_after_run = False
+    if args.min_interval > args.max_interval:
+        raise ValueError("--min-interval 不能大于 --max-interval")
 
     if open_jaw_pairs:
         tasks = build_open_jaw_tasks(open_jaw_pairs, force=args.force)
@@ -207,7 +231,10 @@ def run_flight_job(args):
         "stop_reason": "",
     }
     write_status(status)
-    log(f"任务启动：模式 {run_mode}，城市 {run_label}，待执行 {len(tasks)} 组，间隔 {args.interval}s")
+    log(
+        f"任务启动：模式 {run_mode}，城市 {run_label}，待执行 {len(tasks)} 组，"
+        f"间隔随机 {args.min_interval}-{args.max_interval}s"
+    )
 
     if not tasks:
         if run_mode == "roundtrip":
@@ -269,7 +296,7 @@ def run_flight_job(args):
                 log(reason)
                 break
 
-            if is_success_result(task["output_file"]):
+            if is_success_result(task["output_file"], task["depart_date"], task["return_date"]):
                 group_ready = True
                 if fetcher.query_mode == "open_jaw":
                     try:
@@ -290,7 +317,7 @@ def run_flight_job(args):
                     status["failed_this_run"] += 1
                     technical_failure = True
                     log(f"失败：open_jaw group 汇总未生成，连续失败 {consecutive_failures}/{args.max_consecutive_failures}")
-            elif is_business_no_result(task["output_file"]):
+            elif is_business_no_result(task["output_file"], task["depart_date"], task["return_date"]):
                 consecutive_failures = 0
                 status["completed_this_run"] += 1
                 scraper.append_result_file(task["output_file"])
@@ -298,7 +325,7 @@ def run_flight_job(args):
             else:
                 consecutive_failures += 1
                 status["failed_this_run"] += 1
-                if not os.path.exists(task["output_file"]):
+                if not has_result_for_date(task["output_file"], task["depart_date"], task["return_date"]):
                     write_failure(fetcher, "runner 未生成结果文件")
                 technical_failure = True
                 log(f"失败：连续失败 {consecutive_failures}/{args.max_consecutive_failures}")
@@ -318,8 +345,9 @@ def run_flight_job(args):
                 driver, fetcher = restart_fetcher(fetcher)
 
             if index < len(tasks):
-                log(f"等待 {args.interval} 秒后继续下一组")
-                time.sleep(args.interval)
+                sleep_seconds = random.randint(args.min_interval, args.max_interval)
+                log(f"等待 {sleep_seconds} 秒后继续下一组")
+                time.sleep(sleep_seconds)
     finally:
         driver.quit()
 
