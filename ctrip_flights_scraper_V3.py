@@ -54,7 +54,7 @@ begin_date = '2026-09-25'
 end_date = '2026-10-10'
 
 # 往返最短间隔天数
-min_stay_days = 9
+min_stay_days = 8
 
 # 爬取T+N，即N天后
 start_interval = 1
