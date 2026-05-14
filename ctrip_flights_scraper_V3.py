@@ -964,6 +964,7 @@ class DataFetcher(object):
                 print(
                     f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：更换返程日期-{self.get_date_value(".modifyDate.return-date")}'
                 )
+                self.close_date_picker()
 
                 self.confirm_city_selected(0)
                 self.confirm_city_selected(1)
@@ -1130,6 +1131,10 @@ class DataFetcher(object):
             By.CSS_SELECTOR,
             ".modifyDate input[aria-label=请选择日期]",
         )[trigger_index].get_attribute("value")
+
+    def close_date_picker(self):
+        self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        time.sleep(0.5)
 
     def select_date(self, target_date, trigger_selector):
         target = dt.strptime(target_date, "%Y-%m-%d")
@@ -1342,6 +1347,16 @@ class DataFetcher(object):
             )
         )
 
+    def wait_for_return_stage(self):
+        def is_return_stage(driver):
+            active_tabs = driver.find_elements(By.CSS_SELECTOR, ".segment_tab.active")
+            if any("选择返程" in tab.text for tab in active_tabs):
+                return True
+            body_text = driver.find_element(By.TAG_NAME, "body").text
+            return "选择返程" in body_text and self.city[1] in body_text and self.city[0] in body_text
+
+        WebDriverWait(self.driver, max_search_wait_time).until(is_return_stage)
+
     def extract_visible_flight(self, item):
         text = item.text.replace("\n", " ")
         price_match = re.search(r"¥\s*([\d,]+)", text)
@@ -1365,9 +1380,7 @@ class DataFetcher(object):
         outbound_button = outbound_item.find_element(By.CSS_SELECTOR, ".btn.btn-book")
         outbound_button.click()
 
-        WebDriverWait(self.driver, max_search_wait_time).until(
-            lambda d: "选择返程" in d.find_element(By.CSS_SELECTOR, ".segment_tab.active").text
-        )
+        self.wait_for_return_stage()
         self.select_low_price_sort("返程")
         return_item = self.first_flight_item()
         return_info = self.extract_visible_flight(return_item)

@@ -167,6 +167,12 @@ def write_failure(fetcher, reason):
 def run_query_once(fetcher):
     try:
         fetcher.get_page(1)
+        try:
+            if fetcher.has_login_modal():
+                fetcher.manual_login_required = True
+                log("检测到携程登录弹窗")
+        except Exception as login_error:
+            log(f"登录弹窗检测失败：{type(login_error).__name__}: {login_error}")
         return False
     except Exception as e:
         reason = f"runner 查询异常：{type(e).__name__}, {str(e).split('Stacktrace:')[0].strip()}"
@@ -177,6 +183,13 @@ def run_query_once(fetcher):
             log(f"错误截图已保存：{ERROR_SCREENSHOT_FILE}")
         except Exception as screenshot_error:
             log(f"错误截图保存失败：{type(screenshot_error).__name__}: {screenshot_error}")
+        try:
+            if fetcher.has_login_modal():
+                fetcher.manual_login_required = True
+                log("检测到携程登录弹窗")
+                return False
+        except Exception as login_error:
+            log(f"登录弹窗检测失败：{type(login_error).__name__}: {login_error}")
         try:
             if fetcher.has_verification_challenge():
                 fetcher.captcha_detected = True
@@ -202,6 +215,15 @@ def wait_for_manual_verification(fetcher, wait_seconds):
             return False
         time.sleep(5)
     return False
+
+
+def wait_for_manual_login(fetcher, wait_seconds):
+    original_wait_seconds = scraper.manual_login_wait_seconds
+    scraper.manual_login_wait_seconds = wait_seconds
+    try:
+        return fetcher.wait_for_manual_login()
+    finally:
+        scraper.manual_login_wait_seconds = original_wait_seconds
 
 
 def close_fetcher(fetcher):
@@ -270,6 +292,7 @@ def run_flight_job(args):
         "stopped": False,
         "stop_reason": "",
         "waiting_for_manual_verification": False,
+        "waiting_for_manual_login": False,
     }
     write_status(status)
     log(
@@ -302,6 +325,7 @@ def run_flight_job(args):
             fetcher.query_mode = task.get("mode", "roundtrip")
             fetcher.return_departure_city = task.get("return_departure_city")
             fetcher.captcha_detected = False
+            fetcher.manual_login_required = False
 
             if fetcher.query_mode == "open_jaw":
                 log(
@@ -316,6 +340,36 @@ def run_flight_job(args):
                 )
 
             technical_failure = run_query_once(fetcher)
+
+            if fetcher.manual_login_required:
+                reason = "检测到登录弹窗，等待 lyx 手动完成登录"
+                status["waiting_for_manual_login"] = True
+                status["stop_reason"] = reason
+                write_status(status)
+                log(reason)
+                if wait_for_manual_login(fetcher, args.manual_verification_wait):
+                    status["waiting_for_manual_login"] = False
+                    status["stop_reason"] = ""
+                    write_status(status)
+                    fetcher.manual_login_required = False
+                    log("人工登录完成，重新执行当前组合")
+                    technical_failure = run_query_once(fetcher)
+                else:
+                    reason = "登录等待超时，runner 停止执行"
+                    status["waiting_for_manual_login"] = False
+                    status["stopped"] = True
+                    status["stop_reason"] = reason
+                    write_status(status)
+                    log(reason)
+                    break
+
+            if fetcher.manual_login_required:
+                reason = "登录弹窗仍未解除，runner 停止执行"
+                status["stopped"] = True
+                status["stop_reason"] = reason
+                write_status(status)
+                log(reason)
+                break
 
             if fetcher.captcha_detected:
                 reason = "验证码或风控触发，等待 lyx 手动完成验证"

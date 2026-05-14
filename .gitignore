@@ -8,5 +8,6 @@ log/
 cookies.json
 results/
 .codex/flight_job.log
+.codex/flight_job.nohup.log
 .codex/flight_job_status.json
 .codex/flight_job_last_error.png
