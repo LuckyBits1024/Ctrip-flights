@@ -164,14 +164,13 @@ def write_failure(fetcher, reason):
     fetcher.write_roundtrip_data()
 
 
-def restart_fetcher(fetcher):
+def close_fetcher(fetcher):
+    if fetcher is None:
+        return
     try:
         fetcher.driver.quit()
     except Exception as e:
-        log(f"重启浏览器前关闭旧 driver 失败：{type(e).__name__}: {e}")
-
-    driver = scraper.init_driver()
-    return driver, scraper.DataFetcher(driver)
+        log(f"关闭 driver 失败：{type(e).__name__}: {e}")
 
 
 def parse_args():
@@ -185,8 +184,8 @@ def parse_args():
         metavar=("OUTBOUND_DESTINATION", "RETURN_DEPARTURE_CITY"),
         help="开口程城市对，例如：--open-jaw 巴黎 米兰 表示上海->巴黎、米兰->上海",
     )
-    parser.add_argument("--min-interval", type=int, default=30, help="每组查询后的最短等待秒数")
-    parser.add_argument("--max-interval", type=int, default=60, help="每组查询后的最长等待秒数")
+    parser.add_argument("--min-interval", type=int, default=120, help="每组查询后的最短等待秒数")
+    parser.add_argument("--max-interval", type=int, default=180, help="每组查询后的最长等待秒数")
     parser.add_argument("--max-wait", type=int, default=60, help="首页控件等待秒数")
     parser.add_argument("--max-search-wait", type=int, default=180, help="结果页等待秒数")
     parser.add_argument("--max-consecutive-failures", type=int, default=2, help="连续失败达到该值后停止")
@@ -247,13 +246,14 @@ def run_flight_job(args):
                 log("无待执行开口程任务，未找到可汇总的 raw 文件")
         return
 
-    driver = scraper.init_driver()
-    fetcher = scraper.DataFetcher(driver)
+    fetcher = None
     consecutive_failures = 0
 
     try:
         for index, task in enumerate(tasks, start=1):
             technical_failure = False
+            if fetcher is None:
+                fetcher = scraper.DataFetcher(scraper.init_driver())
             fetcher.city = task["route"]
             fetcher.date = task["depart_date"]
             fetcher.return_date = task["return_date"]
@@ -341,15 +341,16 @@ def run_flight_job(args):
                 break
 
             if technical_failure:
-                log("本组技术失败，重启浏览器会话后继续下一组")
-                driver, fetcher = restart_fetcher(fetcher)
+                log("本组技术失败，关闭浏览器会话；下一组开始时重新打开")
+                close_fetcher(fetcher)
+                fetcher = None
 
             if index < len(tasks):
                 sleep_seconds = random.randint(args.min_interval, args.max_interval)
                 log(f"等待 {sleep_seconds} 秒后继续下一组")
                 time.sleep(sleep_seconds)
     finally:
-        driver.quit()
+        close_fetcher(fetcher)
 
     if run_mode == "roundtrip":
         combined_file = scraper.write_combined_results(scraper.result_files)

@@ -267,3 +267,11 @@
 - 查询间隔从固定 `180s` 改为 `30-60s` 随机等待，对应 CLI 参数为 `--min-interval` 和 `--max-interval`。
 - 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过；`.venv/bin/python run_flight_job.py --help` 正常。
 - 启动前检查 `results/` 下已经没有旧的单日期过程 CSV。
+
+## 2026-05-14 风控频率与 data 页排查
+- lyx 反馈 `30-60s` 间隔可能太短，并且看到多个 Chrome 窗口停在 `data:,`。
+- 已暂停当前 runner，避免继续触发风控。
+- `data:,` 原因：Selenium 新建 Chrome 的默认空白页是 `data:,`；旧逻辑在技术失败后立刻新建浏览器，然后再等待下一组随机间隔，所以等待期间会看到空白 `data:,` 窗口。
+- 已修正 runner：技术失败后只关闭旧浏览器；下一组真正开始时才新建浏览器并立即导航到携程首页。
+- 已将默认随机间隔改为 `120-180s`。
+- 验证：`.venv/bin/python -m py_compile ctrip_flights_scraper_V3.py run_flight_job.py` 通过；`.venv/bin/python run_flight_job.py --help` 正常。
