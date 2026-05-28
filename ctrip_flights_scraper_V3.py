@@ -14,59 +14,24 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 import threading
-
-origin_city = "上海"
-
-# 爬取的欧洲主要城市
-destination_citys = [
-    "巴黎",
-    "法兰克福",
-    "阿姆斯特丹",
-    "马德里",
-    "罗马",
-    "米兰",
-    "慕尼黑",
-    "苏黎世",
-    "维也纳",
-    "伊斯坦布尔",
-    "赫尔辛基",
-    "哥本哈根",
-    "巴塞罗那",
-    "布鲁塞尔",
-    "都柏林",
-    "布拉格",
-    "雅典",
-    "里斯本",
-    "斯德哥尔摩",
-    "奥斯陆",
-    "华沙",
-]
+from flight_query_config import (
+    begin_date,
+    crawl_days,
+    days_interval,
+    destination_citys,
+    end_date,
+    min_stay_days,
+    origin_city,
+    start_interval,
+)
 
 # 爬取的航线
 crawl_routes = [[origin_city, city] for city in destination_citys]
 
-# 爬取日期范围：起始日期。格式'2023-12-01'
-begin_date = '2026-09-25'
-
-# 爬取日期范围：结束日期。格式'2023-12-31'
-end_date = '2026-10-10'
-
-# 往返最短间隔天数
-min_stay_days = 7
-
-# 爬取T+N，即N天后
-start_interval = 1
-
-# 爬取的日期
-crawl_days = 16
-
 # 设置各城市爬取的时间间隔（单位：秒）
 crawl_interval = 30
-
-# 日期间隔
-days_interval = 1
 
 # 设置页面加载的最长等待时间（单位：秒）
 max_wait_time = 60
@@ -109,11 +74,13 @@ COOKIES_FILE = "cookies.json"
 MANUAL_COOKIE_ACCOUNT = "manual_login"
 REQUIRED_COOKIES = ["AHeadUserInfo", "DUID", "IsNonUser", "_udl", "cticket", "login_type", "login_uid"]
 manual_login_wait_seconds = 600
+CHROME_PROFILE_DIR = os.path.abspath(os.path.join(".codex", "chrome-profile"))
+click_pause_seconds = 1.6
 
 # 邮件发送配置
 SENDER_EMAILS = "1264932425@qq.com"
 RECEIVER_EMAIL = "1264932425@qq.com"
-EMAIL_PASSWORD = "kabyhxldvwbojfgj"
+EMAIL_PASSWORD = os.environ.get("CTRIP_RESULT_EMAIL_PASSWORD", "")
 SMTP_SERVER = "smtp.qq.com"
 SMTP_PORT = 465
 
@@ -155,6 +122,10 @@ def set_result_run_day(run_day):
     global result_run_day
     result_run_day = run_day
 
+def set_chrome_profile_dir(profile_dir):
+    global CHROME_PROFILE_DIR
+    CHROME_PROFILE_DIR = os.path.abspath(profile_dir)
+
 def wait_before_retry(stage):
     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} {stage}：等待 {retry_wait_time} 秒后重试')
     time.sleep(retry_wait_time)
@@ -163,6 +134,8 @@ def send_result_email(files):
     if not files:
         print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 没有生成机票结果文件，跳过邮件发送')
         return
+    if not EMAIL_PASSWORD:
+        raise RuntimeError("未设置 CTRIP_RESULT_EMAIL_PASSWORD，不能发送结果邮件")
 
     msg = EmailMessage()
     msg["Subject"] = f"携程机票往返价格结果：{origin_city}-欧洲 {begin_date} 至 {end_date}"
@@ -203,18 +176,20 @@ def send_result_email(files):
     print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 机票结果邮件发送成功：{RECEIVER_EMAIL}')
 
 def init_driver():
+    os.makedirs(CHROME_PROFILE_DIR, exist_ok=True)
     options = webdriver.ChromeOptions()
     options.page_load_strategy = "eager"
-    options.add_argument("--incognito")  # 隐身模式（无痕模式）
+    options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
+    options.add_argument("--profile-directory=Default")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
     # options.add_argument('--headless')  # 启用无头模式
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-blink-features")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--ignore-certificate-errors-spki-list")
     options.add_argument("--ignore-ssl-errors")
@@ -385,6 +360,41 @@ def write_combined_results(files):
     combined.to_csv(combined_file, encoding="UTF-8", index=False)
     return combined_file
 
+def write_combined_open_jaw_results(files):
+    if not files:
+        return None
+
+    frames = []
+    for path in files:
+        if os.path.exists(path):
+            frame = pd.read_csv(path)
+            for column in OPEN_JAW_COLUMNS:
+                if column not in frame.columns:
+                    frame[column] = ""
+            frames.append(frame[OPEN_JAW_COLUMNS])
+
+    if not frames:
+        return None
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(
+        subset=["开口程组合", "去程出发日期", "回程出发日期"],
+        keep="last",
+    )
+    combined = sort_by_price(combined)
+    files_dir = os.path.join(
+        os.getcwd(),
+        "results",
+        f"{begin_date}_to_{end_date}",
+        result_run_day,
+        "open_jaw",
+    )
+    if not os.path.exists(files_dir):
+        os.makedirs(files_dir)
+    combined_file = os.path.join(files_dir, f"{origin_city}-欧洲开口程机票汇总.csv")
+    combined.to_csv(combined_file, encoding="UTF-8", index=False)
+    return combined_file
+
 # element_to_be_clickable 函数来替代 expected_conditions.element_to_be_clickable 或 expected_conditions.visibility_of_element_located
 def element_to_be_clickable(element):
     def check_clickable(driver):
@@ -411,6 +421,13 @@ class DataFetcher(object):
         self.comfort_data = None  # 航班舒适度信息
         self.manual_cookies_loaded = False
         self.captcha_detected = False
+        self.browser_session_lost = False
+        self.browser_restart_required = False
+
+    def click_with_pause(self, element):
+        time.sleep(click_pause_seconds)
+        element.click()
+        time.sleep(click_pause_seconds)
 
     def refresh_driver(self):
         try:
@@ -735,6 +752,7 @@ class DataFetcher(object):
 
     def get_page(self, reset_to_homepage=0):
         next_stage_flag = False
+        self.browser_restart_required = False
         try:
             if reset_to_homepage == 1:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 尝试前往首页...')
@@ -799,6 +817,7 @@ class DataFetcher(object):
                 self.get_page(1)
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 错误次数【{self.err}-{max_retry_time}】,get_page:不继续刷新')
+                self.browser_restart_required = True
                 self.err = 0
         else:
             if next_stage_flag:
@@ -810,6 +829,7 @@ class DataFetcher(object):
                     self.change_city()
             else:
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} 页面加载成功，但未能完成所有操作')
+        return next_stage_flag
 
     def select_trip_type(self, label):
         tabs = WebDriverWait(self.driver, max_wait_time).until(
@@ -984,7 +1004,7 @@ class DataFetcher(object):
                         self.driver.find_element(By.CLASS_NAME, "search-btn")
                     )
                 )
-                ele.click()
+                self.click_with_pause(ele)
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_city：点击搜索按钮')
 
                 next_stage_flag = True
@@ -1084,7 +1104,7 @@ class DataFetcher(object):
                 ele = WebDriverWait(self.driver, max_wait_time).until(
                     element_to_be_clickable(self.driver.find_element(By.CLASS_NAME, "search-btn"))
                 )
-                ele.click()
+                self.click_with_pause(ele)
                 print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} change_open_jaw_city：点击搜索按钮')
 
                 next_stage_flag = True
@@ -1142,7 +1162,12 @@ class DataFetcher(object):
 
     def close_date_picker(self):
         self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-        time.sleep(0.5)
+        WebDriverWait(self.driver, max_wait_time).until(
+            lambda d: not any(
+                picker.is_displayed()
+                for picker in d.find_elements(By.CSS_SELECTOR, ".date-multi, .date-picker.date-picker-block")
+            )
+        )
 
     def select_date(self, target_date, trigger_selector):
         target = dt.strptime(target_date, "%Y-%m-%d")
@@ -1326,13 +1351,20 @@ class DataFetcher(object):
         value = self.driver.find_element(By.CSS_SELECTOR, selector).get_attribute("value")
         raise RuntimeError(f"未能确认城市输入框【{selector}】：{value}")
 
-    def select_low_price_sort(self, stage):
-        ele = WebDriverWait(self.driver, max_search_wait_time).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "li.sort-item.ticket-price"))
-        )
+    def select_low_price_sort(self, stage, required=True):
+        wait_seconds = max_search_wait_time if required else 10
+        try:
+            ele = WebDriverWait(self.driver, wait_seconds).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "li.sort-item.ticket-price"))
+            )
+        except TimeoutException:
+            if required:
+                raise
+            print(f'{time.strftime("%Y-%m-%d_%H-%M-%S")} {stage}：未找到低价优先排序控件，使用当前默认排序')
+            return
         if "active" not in ele.get_attribute("class"):
-            ele.click()
-            WebDriverWait(self.driver, max_search_wait_time).until(
+            self.click_with_pause(ele)
+            WebDriverWait(self.driver, wait_seconds).until(
                 lambda d: "active" in d.find_element(By.CSS_SELECTOR, "li.sort-item.ticket-price").get_attribute("class")
             )
             time.sleep(2)
@@ -1344,15 +1376,19 @@ class DataFetcher(object):
         )
 
     def first_bookable_flight_item(self):
-        return WebDriverWait(self.driver, max_search_wait_time).until(
+        book_button = WebDriverWait(self.driver, max_search_wait_time).until(
             lambda d: next(
                 (
-                    item
-                    for item in d.find_elements(By.CSS_SELECTOR, ".flight-item")
-                    if item.is_displayed() and "订票" in item.text
+                    button
+                    for button in d.find_elements(By.XPATH, "//*[contains(@class,'btn') and contains(normalize-space(.),'订票')]")
+                    if button.is_displayed() and button.is_enabled()
                 ),
                 False,
             )
+        )
+        return book_button.find_element(
+            By.XPATH,
+            "./ancestor::*[contains(@class,'flight') and contains(.,'多程含税价')][1]",
         )
 
     def wait_for_return_stage(self):
@@ -1386,7 +1422,7 @@ class DataFetcher(object):
         outbound_item = self.first_flight_item()
         outbound_info = self.extract_visible_flight(outbound_item)
         outbound_button = outbound_item.find_element(By.CSS_SELECTOR, ".btn.btn-book")
-        outbound_button.click()
+        self.click_with_pause(outbound_button)
 
         self.wait_for_return_stage()
         self.select_low_price_sort("返程")
@@ -1426,18 +1462,18 @@ class DataFetcher(object):
         if not return_departure_city:
             raise RuntimeError("open_jaw 模式缺少返程出发城市")
 
-        self.select_low_price_sort("第一程")
+        self.select_low_price_sort("第一程", required=False)
         outbound_item = self.first_flight_item()
         outbound_info = self.extract_visible_flight(outbound_item)
         outbound_button = outbound_item.find_element(By.CSS_SELECTOR, ".btn.btn-book")
-        outbound_button.click()
+        self.click_with_pause(outbound_button)
 
         WebDriverWait(self.driver, max_search_wait_time).until(
             lambda d: "第二程" in d.find_element(By.TAG_NAME, "body").text
             and return_departure_city in d.find_element(By.TAG_NAME, "body").text
             and self.city[0] in d.find_element(By.TAG_NAME, "body").text
         )
-        self.select_low_price_sort("第二程")
+        self.select_low_price_sort("第二程", required=False)
         return_item = self.first_bookable_flight_item()
         return_info = self.extract_visible_flight(return_item)
 

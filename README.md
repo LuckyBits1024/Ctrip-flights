@@ -111,6 +111,51 @@ Ctrip-Crawler 专注于从携程官网实时提取航班数据，其核心在于
 3. **数据输出**
     采集到的数据经过结构化处理后，将以 CSV 格式存储，便于后续数据分析、统计与可视化处理。
 
+4. **lowestPrice API 低价日历入口**
+   参考 `xiaoeno/-xiechengjipiao_api` 中记录的携程 `lowestPrice` 接口，项目新增了不启动浏览器的 API 查询入口：
+
+   ```bash
+   .venv/bin/python run_lowest_price_api_job.py --request-interval 2
+   ```
+
+   该入口会按 `flight_query_config.py` 中的城市与日期配置，拉取每条单程航线的低价日历，并把开口程两段单程价格相加写入单个汇总 CSV：
+
+   ```text
+   results/<begin_date>_to_<end_date>/<run_day>/api_lowest_price/上海-欧洲开口程API低价汇总.csv
+   ```
+
+   注意：`lowestPrice` 返回的是单程低价日历，不是携程多程页面的实时含税总价；若接口不返回国际航线或目标日期的价格，CSV 会标记为 `接口无价格`。
+
+5. **国际机票 batchSearch API 入口**
+   国际机票不使用国内 `lowestPrice` 接口。项目新增了基于国际搜索页表单数据与 `sign` 请求头的 API 查询入口：
+
+   ```bash
+   .venv/bin/python run_international_api_job.py --request-interval 2
+   ```
+
+   该入口会先读取国际搜索页中的 `GlobalSearchCriteria`，按 `md5(transactionID + departureCityCode + arrivalCityCode + departureDate)` 生成 `sign`，再请求 `batchSearch`。结果写入单个汇总 CSV：
+
+   ```text
+   results/<begin_date>_to_<end_date>/<run_day>/international_api/上海-欧洲开口程国际API汇总.csv
+   ```
+
+   若接口返回 `needUserLogin` 或 `showAuthCode`，CSV 会原样记录为 `API需要登录` 或 `API安全验证`。
+
+6. **真实浏览器 batchSearch API 入口**
+   直接拼 `batchSearch` 请求仍可能缺少携程页面运行时生成的 `token`、`rms-token` 等请求头。项目新增了真实浏览器网络捕获入口：脚本打开国际机票搜索页，由页面自己发起 `batchSearch`，再从浏览器网络响应中解析最低含税价。
+
+   ```bash
+   .venv/bin/python run_browser_api_job.py --request-interval 2 --timeout 45
+   ```
+
+   该入口按 `flight_query_config.py` 中的城市与日期配置查询去重后的单程日期，再组合成开口程汇总。成功的单程查询会缓存到 `.codex/browser_api_route_cache_<run_day>.json`，重跑会跳过已成功的数据。最终结果写入：
+
+   ```text
+   results/<begin_date>_to_<end_date>/<run_day>/international_browser_api/上海-欧洲开口程浏览器API汇总.csv
+   ```
+
+   运行状态会写入 `.codex/browser_api_job_status_<run_day>.json`，便于长任务监控。
+
 ------
 
 ## 配置选项详解

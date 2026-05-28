@@ -11,3 +11,14 @@ results/
 .codex/flight_job.nohup.log
 .codex/flight_job_status.json
 .codex/flight_job_last_error.png
+.codex/flight_job_worker-*.log
+.codex/flight_job_status_worker-*.json
+.codex/flight_job_last_error_worker-*.png
+.codex/lowest_price_api_job.log
+.codex/domestic_to_urumqi_api_job.log
+.codex/international_api_job.log
+.codex/browser_api_job.log
+.codex/browser_api_route_cache_*.json
+.codex/browser_api_job_status_*.json
+.codex/chrome-profile/
+.codex/chrome-profile-worker-*/
